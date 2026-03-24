@@ -1,0 +1,356 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+// ===== SHOPIFY SESSION (required by shopify-app-remix) =====
+
+model Session {
+  id                  String    @id
+  shop                String
+  state               String
+  isOnline            Boolean   @default(false)
+  scope               String?
+  expires             DateTime?
+  accessToken         String
+  userId              BigInt?
+  firstName           String?
+  lastName            String?
+  email               String?
+  accountOwner        Boolean   @default(false)
+  locale              String?
+  collaborator        Boolean?  @default(false)
+  emailVerified       Boolean?  @default(false)
+  refreshToken        String?
+  refreshTokenExpires DateTime?
+}
+
+// ===== CONNECTED STORES =====
+
+model ConnectedStore {
+  id           String      @id @default(cuid())
+  shopDomain   String      @unique
+  shopName     String?
+  accessToken  String // encrypted with AES-256
+  currencyCode String      @default("USD")
+  isBaseStore  Boolean     @default(false)
+  authMethod   AuthMethod  @default(OAUTH)
+  status       StoreStatus @default(ACTIVE)
+  scopes       String?
+  installedAt  DateTime    @default(now())
+  lastSyncAt   DateTime?
+  createdAt    DateTime    @default(now())
+  updatedAt    DateTime    @updatedAt
+
+  syncRulesAsSource          SyncRule[]          @relation("SourceStore")
+  syncRulesAsDest            SyncRule[]          @relation("DestStore")
+  syncLogs                   SyncLog[]
+  productMappingsAsSource    ProductMapping[]    @relation("SourceStoreMapping")
+  productMappingsAsDest      ProductMapping[]    @relation("DestStoreMapping")
+  collectionMappingsAsSource CollectionMapping[] @relation("SourceCollectionStore")
+  collectionMappingsAsDest   CollectionMapping[] @relation("DestCollectionStore")
+}
+
+enum AuthMethod {
+  OAUTH
+  CUSTOM_TOKEN
+}
+
+enum StoreStatus {
+  ACTIVE
+  INACTIVE
+  ERROR
+  DISCONNECTED
+}
+
+// ===== SYNC RULES =====
+
+model SyncRule {
+  id            String @id @default(cuid())
+  name          String
+  sourceStoreId String
+  sourceStore   ConnectedStore @relation("SourceStore", fields: [sourceStoreId], references: [id], onDelete: Cascade)
+  destStoreId   String
+  destStore     ConnectedStore @relation("DestStore", fields: [destStoreId], references: [id], onDelete: Cascade)
+
+  // What to sync (toggleable)
+  syncProducts    Boolean @default(true)
+  syncVariants    Boolean @default(true)
+  syncCollections Boolean @default(true)
+  syncInventory   Boolean @default(true)
+  syncMetafields  Boolean @default(true)
+  syncImages      Boolean @default(true)
+  syncSeo         Boolean @default(true)
+  syncTags        Boolean @default(true)
+
+  // Field-level exclusions (JSON array of field names to skip)
+  excludedFields String?
+
+  // Selective sync filters
+  filterType          FilterType @default(ALL)
+  filterCollectionIds String? // JSON array of source collection GIDs
+  filterProductIds    String? // JSON array of source product GIDs
+  filterTags          String? // comma-separated tags
+
+  // Destination product status
+  destProductStatus DestProductStatus @default(SAME_AS_SOURCE)
+
+  // Schedule
+  syncMode         SyncMode          @default(REALTIME)
+  scheduleInterval ScheduleInterval?
+  cronExpression   String?
+
+  // Price rule
+  priceRuleId String?
+  priceRule   PriceRule? @relation(fields: [priceRuleId], references: [id])
+
+  isActive  Boolean   @default(true)
+  lastRunAt DateTime?
+  createdAt DateTime  @default(now())
+  updatedAt DateTime  @updatedAt
+
+  syncLogs SyncLog[]
+}
+
+enum FilterType {
+  ALL
+  SELECTED_COLLECTIONS
+  SELECTED_PRODUCTS
+  BY_TAGS
+}
+
+enum DestProductStatus {
+  SAME_AS_SOURCE
+  ALWAYS_ACTIVE
+  ALWAYS_DRAFT
+}
+
+enum SyncMode {
+  REALTIME
+  SCHEDULED
+  REALTIME_AND_SCHEDULED
+  MANUAL
+}
+
+enum ScheduleInterval {
+  EVERY_5_MIN
+  EVERY_15_MIN
+  EVERY_30_MIN
+  HOURLY
+  EVERY_6_HOURS
+  DAILY
+}
+
+// ===== PRICE RULES =====
+
+model PriceRule {
+  id             String        @id @default(cuid())
+  name           String
+  type           PriceRuleType
+  value          Float // percentage or fixed amount
+  targetCurrency String        @default("USD")
+  roundTo        Float?        @default(0.99) // rounding (.99, .95, .00)
+  applyToCompareAt Boolean     @default(false)
+  createdAt      DateTime      @default(now())
+  updatedAt      DateTime      @updatedAt
+
+  syncRules SyncRule[]
+}
+
+enum PriceRuleType {
+  PERCENTAGE_MARKUP
+  PERCENTAGE_DISCOUNT
+  FIXED_MARKUP
+  FIXED_DISCOUNT
+  CURRENCY_CONVERSION
+}
+
+// ===== PRODUCT MAPPING =====
+
+model ProductMapping {
+  id              String @id @default(cuid())
+  sourceStoreId   String
+  sourceStore     ConnectedStore @relation("SourceStoreMapping", fields: [sourceStoreId], references: [id], onDelete: Cascade)
+  destStoreId     String
+  destStore       ConnectedStore @relation("DestStoreMapping", fields: [destStoreId], references: [id], onDelete: Cascade)
+
+  sourceProductGid String
+  destProductGid   String?
+  sourceHandle     String
+
+  // JSON: [{ sourceVariantGid, destVariantGid, sourceSku }]
+  variantMappings String? 
+  lastSyncedAt DateTime?
+  syncHash     String? // MD5 hash for change detection
+  status       MappingStatus @default(PENDING)
+  createdAt    DateTime      @default(now())
+  updatedAt    DateTime      @updatedAt
+
+  @@unique([sourceStoreId, destStoreId, sourceProductGid])
+  @@index([sourceHandle])
+  @@index([destProductGid])
+}
+
+enum MappingStatus {
+  PENDING
+  SYNCED
+  ERROR
+  SKIPPED
+}
+
+// ===== COLLECTION MAPPING =====
+
+model CollectionMapping {
+  id                  String @id @default(cuid())
+  sourceStoreId       String
+  sourceStore         ConnectedStore @relation("SourceCollectionStore", fields: [sourceStoreId], references: [id], onDelete: Cascade)
+  destStoreId         String
+  destStore           ConnectedStore @relation("DestCollectionStore", fields: [destStoreId], references: [id], onDelete: Cascade)
+
+  sourceCollectionGid String
+  destCollectionGid   String?
+  sourceHandle        String
+  destTitle           String? // optional override
+  lastSyncedAt        DateTime?
+  status              MappingStatus @default(PENDING)
+  createdAt           DateTime      @default(now())
+  updatedAt           DateTime      @updatedAt
+
+  @@unique([sourceStoreId, destStoreId, sourceCollectionGid])
+}
+
+// ===== SYNC LOGS =====
+
+model SyncLog {
+  id         String @id @default(cuid())
+  syncRuleId String?
+  syncRule   SyncRule? @relation(fields: [syncRuleId], references: [id], onDelete: SetNull)
+  storeId    String?
+  store      ConnectedStore? @relation(fields: [storeId], references: [id], onDelete: SetNull)
+
+  action       SyncAction
+  resourceType ResourceType
+  sourceGid    String?
+  destGid      String?
+  status       LogStatus
+  trigger      SyncTrigger
+
+  message     String?
+  errorDetail String?
+  duration    Int? // milliseconds
+
+  createdAt DateTime @default(now())
+
+  @@index([syncRuleId, createdAt])
+  @@index([status, createdAt])
+  @@index([resourceType, createdAt])
+}
+
+enum SyncAction {
+  CREATE
+  UPDATE
+  DELETE
+  SKIP
+}
+
+enum ResourceType {
+  PRODUCT
+  VARIANT
+  COLLECTION
+  INVENTORY
+  METAFIELD
+  IMAGE
+  SEO
+}
+
+enum LogStatus {
+  SUCCESS
+  FAILED
+  PARTIAL
+  SKIPPED
+  RETRYING
+}
+
+enum SyncTrigger {
+  WEBHOOK
+  SCHEDULED
+  MANUAL
+  BULK_OPERATION
+  RETRY
+}
+
+// ===== EXCHANGE RATES =====
+
+model ExchangeRate {
+  id           String   @id @default(cuid())
+  fromCurrency String
+  toCurrency   String
+  rate         Float
+  fetchedAt    DateTime @default(now())
+
+  @@unique([fromCurrency, toCurrency])
+  @@index([fetchedAt])
+}
+
+// ===== BULK OPERATION TRACKING =====
+
+model BulkOperationTracker {
+  id               String   @id @default(cuid())
+  shopDomain       String
+  shopifyBulkOpGid String   @unique
+  operationType    String // "QUERY" or "MUTATION"
+  purpose          String // "INITIAL_SYNC", "SCHEDULED_SYNC"
+  status           String // mirrors Shopify BulkOperationStatus
+  syncRuleId       String?
+  objectCount      Int?
+  fileSize         Int?
+  resultUrl        String?
+  errorCode        String?
+  startedAt        DateTime @default(now())
+  completedAt      DateTime?
+
+  @@index([shopDomain, status])
+}
+
+// ===== BILLING / SUBSCRIPTIONS =====
+
+model Subscription {
+  id               String           @id @default(cuid())
+  shopDomain       String           @unique
+  plan             BillingPlan      @default(FREE)
+  shopifyChargeGid String?
+  productLimit     Int              @default(100)
+  status           SubscriptionStatus @default(ACTIVE)
+  trialEndsAt      DateTime?
+  currentPeriodEnd DateTime?
+  createdAt        DateTime         @default(now())
+  updatedAt        DateTime         @updatedAt
+}
+
+enum BillingPlan {
+  FREE
+  BASIC
+  PRO
+  ENTERPRISE
+}
+
+enum SubscriptionStatus {
+  ACTIVE
+  CANCELLED
+  FROZEN
+  TRIAL
+}
+
+// ===== USAGE TRACKING =====
+
+model UsageTracker {
+  id                 String @id @default(cuid())
+  shopDomain         String @unique
+  syncedProductCount Int    @default(0)
+  lastCountedAt      DateTime @default(now())
+  updatedAt          DateTime @updatedAt
+}

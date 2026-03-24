@@ -1,0 +1,447 @@
+import { createHash } from "crypto";
+import type { SyncRule, PriceRule, ConnectedStore } from "@prisma/client";
+import prisma from "../db.server";
+import {
+  ShopifyGraphQLClient,
+  createClientForStore,
+} from "./shopify-client.server";
+import { GET_PRODUCT_FOR_SYNC } from "../graphql/queries";
+import { PRODUCT_SET_MUTATION, PRODUCT_DELETE_MUTATION } from "../graphql/mutations";
+import { transformPrice, getExchangeRate } from "./price-transformer.server";
+import { checkProductLimit, incrementProductCount } from "./billing.server";
+
+interface SyncProductResult {
+  success: boolean;
+  action: "CREATE" | "UPDATE" | "DELETE" | "SKIP";
+  sourceGid: string;
+  destGid?: string;
+  error?: string;
+  duration: number;
+}
+
+type SyncRuleWithRelations = SyncRule & {
+  sourceStore: ConnectedStore;
+  destStore: ConnectedStore;
+  priceRule: PriceRule | null;
+};
+
+/**
+ * Sync a single product from source to destination
+ */
+export async function syncProduct(
+  syncRule: SyncRuleWithRelations,
+  sourceProductGid: string,
+  sourceClient: ShopifyGraphQLClient,
+  destClient: ShopifyGraphQLClient
+): Promise<SyncProductResult> {
+  const startTime = Date.now();
+
+  try {
+    // Fetch full product data from source
+    const sourceResult = await sourceClient.queryWithRetry(
+      GET_PRODUCT_FOR_SYNC,
+      { id: sourceProductGid }
+    );
+
+    if (sourceResult.errors?.length || !sourceResult.data?.product) {
+      return {
+        success: false,
+        action: "SKIP",
+        sourceGid: sourceProductGid,
+        error:
+          sourceResult.errors?.[0]?.message || "Product not found on source",
+        duration: Date.now() - startTime,
+      };
+    }
+
+    const sourceProduct = sourceResult.data.product;
+
+    // Check change detection via hash
+    const currentHash = computeProductHash(sourceProduct);
+    const existingMapping = await prisma.productMapping.findUnique({
+      where: {
+        sourceStoreId_destStoreId_sourceProductGid: {
+          sourceStoreId: syncRule.sourceStoreId,
+          destStoreId: syncRule.destStoreId,
+          sourceProductGid,
+        },
+      },
+    });
+
+    if (existingMapping?.syncHash === currentHash && existingMapping.destProductGid) {
+      return {
+        success: true,
+        action: "SKIP",
+        sourceGid: sourceProductGid,
+        destGid: existingMapping.destProductGid,
+        duration: Date.now() - startTime,
+      };
+    }
+
+    // Check billing limits for new products
+    const isNewProduct = !existingMapping?.destProductGid;
+    if (isNewProduct) {
+      const limitCheck = await checkProductLimit(
+        syncRule.sourceStore.shopDomain
+      );
+      if (!limitCheck.allowed) {
+        return {
+          success: false,
+          action: "SKIP",
+          sourceGid: sourceProductGid,
+          error: `Product limit reached (${limitCheck.currentCount}/${limitCheck.limit}). Upgrade plan to sync more products.`,
+          duration: Date.now() - startTime,
+        };
+      }
+    }
+
+    // Build ProductSetInput
+    const input = await buildProductSetInput(
+      sourceProduct,
+      syncRule,
+      existingMapping?.destProductGid || undefined,
+      existingMapping?.variantMappings
+        ? JSON.parse(existingMapping.variantMappings)
+        : undefined
+    );
+
+    // Execute productSet on destination
+    const destResult = await destClient.queryWithRetry(PRODUCT_SET_MUTATION, {
+      input,
+      synchronous: true,
+    });
+
+    if (destResult.data?.productSet?.userErrors?.length) {
+      const errors = destResult.data.productSet.userErrors;
+      return {
+        success: false,
+        action: isNewProduct ? "CREATE" : "UPDATE",
+        sourceGid: sourceProductGid,
+        error: errors.map((e: any) => e.message).join("; "),
+        duration: Date.now() - startTime,
+      };
+    }
+
+    const destProduct = destResult.data?.productSet?.product;
+    if (!destProduct) {
+      return {
+        success: false,
+        action: isNewProduct ? "CREATE" : "UPDATE",
+        sourceGid: sourceProductGid,
+        error: "No product returned from productSet",
+        duration: Date.now() - startTime,
+      };
+    }
+
+    // Build variant mappings
+    const variantMappings = buildVariantMappings(
+      sourceProduct.variants.edges,
+      destProduct.variants.edges
+    );
+
+    // Update product mapping
+    await prisma.productMapping.upsert({
+      where: {
+        sourceStoreId_destStoreId_sourceProductGid: {
+          sourceStoreId: syncRule.sourceStoreId,
+          destStoreId: syncRule.destStoreId,
+          sourceProductGid,
+        },
+      },
+      update: {
+        destProductGid: destProduct.id,
+        variantMappings: JSON.stringify(variantMappings),
+        syncHash: currentHash,
+        status: "SYNCED",
+        lastSyncedAt: new Date(),
+      },
+      create: {
+        sourceStoreId: syncRule.sourceStoreId,
+        destStoreId: syncRule.destStoreId,
+        sourceProductGid,
+        destProductGid: destProduct.id,
+        sourceHandle: sourceProduct.handle,
+        variantMappings: JSON.stringify(variantMappings),
+        syncHash: currentHash,
+        status: "SYNCED",
+        lastSyncedAt: new Date(),
+      },
+    });
+
+    // Increment product count for new products
+    if (isNewProduct) {
+      await incrementProductCount(syncRule.sourceStore.shopDomain);
+    }
+
+    return {
+      success: true,
+      action: isNewProduct ? "CREATE" : "UPDATE",
+      sourceGid: sourceProductGid,
+      destGid: destProduct.id,
+      duration: Date.now() - startTime,
+    };
+  } catch (error) {
+    return {
+      success: false,
+      action: "SKIP",
+      sourceGid: sourceProductGid,
+      error: (error as Error).message,
+      duration: Date.now() - startTime,
+    };
+  }
+}
+
+/**
+ * Delete a product from destination store
+ */
+export async function deleteProductOnDestination(
+  syncRule: SyncRuleWithRelations,
+  sourceProductGid: string,
+  destClient: ShopifyGraphQLClient
+): Promise<SyncProductResult> {
+  const startTime = Date.now();
+
+  const mapping = await prisma.productMapping.findUnique({
+    where: {
+      sourceStoreId_destStoreId_sourceProductGid: {
+        sourceStoreId: syncRule.sourceStoreId,
+        destStoreId: syncRule.destStoreId,
+        sourceProductGid,
+      },
+    },
+  });
+
+  if (!mapping?.destProductGid) {
+    return {
+      success: true,
+      action: "SKIP",
+      sourceGid: sourceProductGid,
+      duration: Date.now() - startTime,
+    };
+  }
+
+  try {
+    await destClient.queryWithRetry(PRODUCT_DELETE_MUTATION, {
+      input: { id: mapping.destProductGid },
+    });
+
+    await prisma.productMapping.delete({ where: { id: mapping.id } });
+
+    return {
+      success: true,
+      action: "DELETE",
+      sourceGid: sourceProductGid,
+      destGid: mapping.destProductGid,
+      duration: Date.now() - startTime,
+    };
+  } catch (error) {
+    return {
+      success: false,
+      action: "DELETE",
+      sourceGid: sourceProductGid,
+      error: (error as Error).message,
+      duration: Date.now() - startTime,
+    };
+  }
+}
+
+/**
+ * Build ProductSetInput from source product data
+ */
+async function buildProductSetInput(
+  sourceProduct: any,
+  syncRule: SyncRuleWithRelations,
+  existingDestProductId?: string,
+  existingVariantMappings?: Array<{
+    sourceVariantGid: string;
+    destVariantGid: string;
+    sourceSku: string;
+  }>
+): Promise<any> {
+  const excludedFields: string[] = syncRule.excludedFields
+    ? JSON.parse(syncRule.excludedFields)
+    : [];
+
+  const input: any = {
+    title: sourceProduct.title,
+    handle: sourceProduct.handle,
+  };
+
+  // Set destination product ID if updating existing
+  if (existingDestProductId) {
+    input.id = existingDestProductId;
+  }
+
+  // Product fields (respecting toggle + exclusions)
+  if (syncRule.syncProducts) {
+    if (!excludedFields.includes("description")) {
+      input.descriptionHtml = sourceProduct.descriptionHtml;
+    }
+    if (!excludedFields.includes("vendor")) {
+      input.vendor = sourceProduct.vendor;
+    }
+    if (!excludedFields.includes("productType")) {
+      input.productType = sourceProduct.productType;
+    }
+
+    // Product status
+    switch (syncRule.destProductStatus) {
+      case "ALWAYS_ACTIVE":
+        input.status = "ACTIVE";
+        break;
+      case "ALWAYS_DRAFT":
+        input.status = "DRAFT";
+        break;
+      default:
+        input.status = sourceProduct.status;
+    }
+  }
+
+  // Tags
+  if (syncRule.syncTags && !excludedFields.includes("tags")) {
+    input.tags = sourceProduct.tags;
+  }
+
+  // SEO
+  if (syncRule.syncSeo && !excludedFields.includes("seo")) {
+    input.seo = sourceProduct.seo;
+  }
+
+  // Product options
+  if (sourceProduct.options?.length) {
+    input.productOptions = sourceProduct.options.map((opt: any) => ({
+      name: opt.name,
+      position: opt.position,
+      values: opt.values.map((v: any) => ({ name: v })),
+    }));
+  }
+
+  // Variants with price transformation
+  if (syncRule.syncVariants) {
+    let exchangeRate: number | undefined;
+    if (
+      syncRule.priceRule?.type === "CURRENCY_CONVERSION" &&
+      syncRule.sourceStore.currencyCode !== syncRule.priceRule.targetCurrency
+    ) {
+      exchangeRate = await getExchangeRate(
+        syncRule.sourceStore.currencyCode,
+        syncRule.priceRule.targetCurrency
+      );
+    }
+
+    input.variants = sourceProduct.variants.edges.map(
+      (edge: any, index: number) => {
+        const variant = edge.node;
+        const variantInput: any = {
+          position: index + 1,
+          sku: variant.sku,
+          barcode: variant.barcode,
+          optionValues: variant.selectedOptions?.map((opt: any) => ({
+            optionName: opt.name,
+            name: opt.value,
+          })),
+        };
+
+        // Map existing destination variant ID
+        if (existingVariantMappings) {
+          const mapping = existingVariantMappings.find(
+            (m) => m.sourceVariantGid === variant.id
+          );
+          if (mapping?.destVariantGid) {
+            variantInput.id = mapping.destVariantGid;
+          }
+        }
+
+        // Price transformation
+        if (syncRule.priceRule) {
+          const transformed = transformPrice(
+            variant.price,
+            variant.compareAtPrice,
+            syncRule.priceRule,
+            syncRule.sourceStore.currencyCode,
+            exchangeRate
+          );
+          variantInput.price = parseFloat(transformed.price);
+          if (transformed.compareAtPrice) {
+            variantInput.compareAtPrice = parseFloat(
+              transformed.compareAtPrice
+            );
+          }
+        } else {
+          variantInput.price = parseFloat(variant.price);
+          if (variant.compareAtPrice) {
+            variantInput.compareAtPrice = parseFloat(variant.compareAtPrice);
+          }
+        }
+
+        return variantInput;
+      }
+    );
+  }
+
+  // Metafields
+  if (
+    syncRule.syncMetafields &&
+    sourceProduct.metafields?.edges?.length
+  ) {
+    input.metafields = sourceProduct.metafields.edges.map((edge: any) => ({
+      namespace: edge.node.namespace,
+      key: edge.node.key,
+      value: edge.node.value,
+      type: edge.node.type,
+    }));
+  }
+
+  return input;
+}
+
+/**
+ * Build variant mappings between source and destination
+ */
+function buildVariantMappings(
+  sourceVariantEdges: any[],
+  destVariantEdges: any[]
+): Array<{
+  sourceVariantGid: string;
+  destVariantGid: string;
+  sourceSku: string;
+}> {
+  return sourceVariantEdges.map((sourceEdge: any, index: number) => {
+    const destEdge = destVariantEdges[index];
+    return {
+      sourceVariantGid: sourceEdge.node.id,
+      destVariantGid: destEdge?.node?.id || "",
+      sourceSku: sourceEdge.node.sku || "",
+    };
+  });
+}
+
+/**
+ * Compute a hash of product data for change detection
+ */
+function computeProductHash(product: any): string {
+  const relevantData = {
+    title: product.title,
+    descriptionHtml: product.descriptionHtml,
+    vendor: product.vendor,
+    productType: product.productType,
+    tags: product.tags,
+    status: product.status,
+    seo: product.seo,
+    variants: product.variants?.edges?.map((e: any) => ({
+      sku: e.node.sku,
+      price: e.node.price,
+      compareAtPrice: e.node.compareAtPrice,
+      barcode: e.node.barcode,
+    })),
+    metafields: product.metafields?.edges?.map((e: any) => ({
+      namespace: e.node.namespace,
+      key: e.node.key,
+      value: e.node.value,
+    })),
+  };
+
+  return createHash("md5")
+    .update(JSON.stringify(relevantData))
+    .digest("hex");
+}

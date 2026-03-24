@@ -1,0 +1,56 @@
+databases:
+  - name: store-sync-db
+    plan: free
+    databaseName: store_sync
+    user: store_sync_user
+
+services:
+  # Web service (Remix app)
+  - type: web
+    name: store-sync-pro
+    runtime: docker
+    plan: free
+    dockerfilePath: ./Dockerfile
+    dockerCommand: npm run docker-start
+    healthCheckPath: /
+    envVars:
+      - key: NODE_ENV
+        value: production
+      - key: DATABASE_URL
+        fromDatabase:
+          name: store-sync-db
+          property: connectionString
+      - key: REDIS_URL
+        value: "" # Will add after creating Redis
+      - key: ENCRYPTION_KEY
+        generateValue: true
+      - key: SHOPIFY_API_KEY
+        sync: false
+      - key: SHOPIFY_API_SECRET
+        sync: false
+      - key: SCOPES
+        value: write_products,read_products,write_inventory,read_inventory,read_product_listings,write_content,read_content,read_themes,write_themes
+      - key: HOST
+        fromService:
+          name: store-sync-pro
+          type: web
+          property: host
+
+  # Worker service (BullMQ)
+  - type: worker
+    name: store-sync-worker
+    runtime: docker
+    plan: free
+    dockerfilePath: ./Dockerfile
+    dockerCommand: node --import tsx worker.ts
+    envVars:
+      - key: NODE_ENV
+        value: production
+      - key: DATABASE_URL
+        fromDatabase:
+          name: store-sync-db
+          property: connectionString
+      - key: REDIS_URL
+        value: ""
+      - key: ENCRYPTION_KEY
+        sync: false

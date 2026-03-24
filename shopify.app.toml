@@ -1,0 +1,56 @@
+# This file stores configurations for your Shopify app.
+
+name = "Store Sync Pro"
+client_id = "c9045bbb10f21af7d4d6ffa74a720e1d"
+application_url = "https://store-sync-pro.onrender.com"
+embedded = true
+
+[auth]
+redirect_urls = [
+  "https://store-sync-pro.onrender.com/auth/callback",
+  "https://store-sync-pro.onrender.com/auth/shopify/callback",
+  "https://store-sync-pro.onrender.com/api/auth/callback"
+]
+
+[access_scopes]
+scopes = "write_products,read_products,write_inventory,read_inventory,read_product_listings,write_content,read_content,read_themes,write_themes"
+
+[webhooks]
+api_version = "2025-01"
+
+  [[webhooks.subscriptions]]
+  uri = "/webhooks/app/uninstalled"
+  topics = ["app/uninstalled"]
+
+  [[webhooks.subscriptions]]
+  topics = ["app/scopes_update"]
+  uri = "/webhooks/app/scopes_update"
+
+  [[webhooks.subscriptions]]
+  topics = ["products/create", "products/update", "products/delete"]
+  uri = "/webhooks/products"
+
+  [[webhooks.subscriptions]]
+  topics = ["collections/create", "collections/update", "collections/delete"]
+  uri = "/webhooks/collections"
+
+  [[webhooks.subscriptions]]
+  topics = ["inventory_levels/update"]
+  uri = "/webhooks/inventory"
+
+  [[webhooks.subscriptions]]
+  topics = ["bulk_operations/finish"]
+  uri = "/webhooks/bulk-finish"
+
+  # Mandatory compliance webhooks
+  [[webhooks.subscriptions]]
+  uri = "/webhooks/customers/data_request"
+  compliance_topics = ["customers/data_request"]
+
+  [[webhooks.subscriptions]]
+  uri = "/webhooks/customers/redact"
+  compliance_topics = ["customers/redact"]
+
+  [[webhooks.subscriptions]]
+  uri = "/webhooks/shop/redact"
+  compliance_topics = ["shop/redact"]
