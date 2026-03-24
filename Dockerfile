@@ -9,7 +9,7 @@ ENV NODE_ENV=production
 
 # Install dependencies
 COPY package.json package-lock.json* ./
-RUN npm ci --omit=dev && npm cache clean --force
+RUN npm ci --omit=dev --legacy-peer-deps && npm cache clean --force
 # Remove CLI packages since we don't need them in production
 RUN npm remove @shopify/cli
 
