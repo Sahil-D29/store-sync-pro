@@ -4,7 +4,86 @@ import { encrypt, decrypt } from "../utils/encryption.server";
 import { validateStoreToken } from "./shopify-client.server";
 
 /**
- * Connect a new destination store (via custom token)
+ * Connect a destination store via OAuth (looks up the Shopify session created when
+ * the merchant installed the app on the destination store)
+ */
+export async function connectStoreViaOAuth(
+  shopDomain: string,
+  baseStoreShopDomain: string
+): Promise<{
+  success: boolean;
+  store?: any;
+  error?: string;
+}> {
+  shopDomain = normalizeDomain(shopDomain);
+
+  if (shopDomain === normalizeDomain(baseStoreShopDomain)) {
+    return { success: false, error: "Cannot connect the base store as a destination" };
+  }
+
+  // Check if already connected
+  const existing = await prisma.connectedStore.findUnique({
+    where: { shopDomain },
+  });
+
+  if (existing && existing.status !== "DISCONNECTED") {
+    return { success: false, error: "Store is already connected" };
+  }
+
+  // Look up the offline session created by Shopify OAuth when the app was installed
+  const session = await prisma.session.findFirst({
+    where: {
+      shop: shopDomain,
+      isOnline: false,
+    },
+    orderBy: { id: "desc" },
+  });
+
+  if (!session || !session.accessToken) {
+    return {
+      success: false,
+      error: `No session found for ${shopDomain}. Please install the app on that store first, then come back here and click "Verify & Connect".`,
+    };
+  }
+
+  // Validate the token works
+  const validation = await validateStoreToken(shopDomain, session.accessToken);
+  if (!validation.valid) {
+    return {
+      success: false,
+      error: `Session token is invalid or expired: ${validation.error}. Try reinstalling the app on ${shopDomain}.`,
+    };
+  }
+
+  // Encrypt and store
+  const encryptedToken = encrypt(session.accessToken);
+
+  const store = await prisma.connectedStore.upsert({
+    where: { shopDomain },
+    update: {
+      accessToken: encryptedToken,
+      shopName: validation.shopName,
+      currencyCode: validation.currencyCode || "USD",
+      authMethod: "OAUTH" as AuthMethod,
+      status: "ACTIVE",
+      isBaseStore: false,
+    },
+    create: {
+      shopDomain,
+      accessToken: encryptedToken,
+      shopName: validation.shopName,
+      currencyCode: validation.currencyCode || "USD",
+      authMethod: "OAUTH" as AuthMethod,
+      status: "ACTIVE",
+      isBaseStore: false,
+    },
+  });
+
+  return { success: true, store };
+}
+
+/**
+ * Connect a new destination store (via custom token - legacy fallback)
  */
 export async function connectStoreWithToken(
   shopDomain: string,

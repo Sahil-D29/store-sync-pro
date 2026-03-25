@@ -22,7 +22,7 @@ import { TitleBar } from "@shopify/app-bridge-react";
 import { authenticate } from "../shopify.server";
 import {
   getConnectedStores,
-  connectStoreWithToken,
+  connectStoreViaOAuth,
   disconnectStore,
   registerBaseStore,
   refreshStoreConnection,
@@ -35,6 +35,7 @@ export const loader = async ({ request }: LoaderFunctionArgs) => {
   return json({
     stores,
     currentShop: session.shop,
+    appClientId: process.env.SHOPIFY_API_KEY || "",
   });
 };
 
@@ -44,25 +45,20 @@ export const action = async ({ request }: ActionFunctionArgs) => {
   const intent = formData.get("intent") as string;
 
   switch (intent) {
-    case "connect-token": {
+    case "connect-oauth": {
       const shopDomain = formData.get("shopDomain") as string;
-      const accessToken = formData.get("accessToken") as string;
 
-      if (!shopDomain || !accessToken) {
-        return json({ error: "Shop domain and access token are required" }, { status: 400 });
+      if (!shopDomain) {
+        return json({ error: "Shop domain is required" }, { status: 400 });
       }
 
-      const result = await connectStoreWithToken(
-        shopDomain,
-        accessToken,
-        session.shop
-      );
+      const result = await connectStoreViaOAuth(shopDomain, session.shop);
 
       if (!result.success) {
         return json({ error: result.error }, { status: 400 });
       }
 
-      return json({ success: true, message: "Store connected successfully" });
+      return json({ success: true, message: "Store connected successfully via OAuth" });
     }
 
     case "register-base": {
@@ -99,26 +95,37 @@ export const action = async ({ request }: ActionFunctionArgs) => {
 };
 
 export default function StoresPage() {
-  const { stores, currentShop } = useLoaderData<typeof loader>();
+  const { stores, currentShop, appClientId } = useLoaderData<typeof loader>();
   const submit = useSubmit();
   const navigation = useNavigation();
   const isSubmitting = navigation.state === "submitting";
 
   const [showConnectModal, setShowConnectModal] = useState(false);
   const [shopDomain, setShopDomain] = useState("");
-  const [accessToken, setAccessToken] = useState("");
+  const [connectStep, setConnectStep] = useState<"install" | "verify">("install");
 
   const baseStore = stores.find((s: any) => s.isBaseStore);
   const destinationStores = stores.filter((s: any) => !s.isBaseStore);
 
-  const handleConnect = () => {
+  const getInstallUrl = () => {
+    const domain = shopDomain.trim().toLowerCase().replace(/^https?:\/\//, "").replace(/\/$/, "");
+    const storeName = domain.replace(".myshopify.com", "");
+    return `https://admin.shopify.com/store/${storeName}/oauth/install?client_id=${appClientId}`;
+  };
+
+  const handleOpenInstallLink = () => {
+    window.open(getInstallUrl(), "_blank");
+    setConnectStep("verify");
+  };
+
+  const handleVerifyConnect = () => {
     submit(
-      { intent: "connect-token", shopDomain, accessToken },
+      { intent: "connect-oauth", shopDomain },
       { method: "POST" }
     );
     setShowConnectModal(false);
     setShopDomain("");
-    setAccessToken("");
+    setConnectStep("install");
   };
 
   const handleRegisterBase = () => {
@@ -283,18 +290,34 @@ export default function StoresPage() {
       {/* Connect Store Modal */}
       <Modal
         open={showConnectModal}
-        onClose={() => setShowConnectModal(false)}
-        title="Connect Destination Store"
-        primaryAction={{
-          content: "Connect",
-          onAction: handleConnect,
-          loading: isSubmitting,
-          disabled: !shopDomain || !accessToken,
+        onClose={() => {
+          setShowConnectModal(false);
+          setConnectStep("install");
+          setShopDomain("");
         }}
+        title="Connect Destination Store"
+        primaryAction={
+          connectStep === "install"
+            ? {
+                content: "Open Install Link",
+                onAction: handleOpenInstallLink,
+                disabled: !shopDomain,
+              }
+            : {
+                content: "Verify & Connect",
+                onAction: handleVerifyConnect,
+                loading: isSubmitting,
+                disabled: !shopDomain,
+              }
+        }
         secondaryActions={[
           {
             content: "Cancel",
-            onAction: () => setShowConnectModal(false),
+            onAction: () => {
+              setShowConnectModal(false);
+              setConnectStep("install");
+              setShopDomain("");
+            },
           },
         ]}
       >
@@ -302,30 +325,40 @@ export default function StoresPage() {
           <BlockStack gap="400">
             <Banner tone="info">
               <p>
-                To connect a destination store, create a Custom App in that
-                store's admin (Settings &gt; Apps and sales channels &gt;
-                Develop apps) and paste the Admin API access token here.
+                Connect a destination store in 2 steps: first install this app
+                on the destination store, then verify the connection here.
               </p>
             </Banner>
 
             <TextField
-              label="Store domain"
+              label="Destination store domain"
               value={shopDomain}
               onChange={setShopDomain}
-              placeholder="my-store.myshopify.com"
+              placeholder="my-other-store.myshopify.com"
               helpText="The myshopify.com domain of the destination store"
               autoComplete="off"
             />
 
-            <TextField
-              label="Admin API access token"
-              value={accessToken}
-              onChange={setAccessToken}
-              placeholder="shpat_..."
-              type="password"
-              helpText="From the Custom App's API credentials page"
-              autoComplete="off"
-            />
+            {connectStep === "install" && shopDomain && (
+              <Banner tone="warning">
+                <p>
+                  Step 1: Click "Open Install Link" to install this app on{" "}
+                  {shopDomain}. You must be logged into that store's Shopify
+                  admin. After installing, come back here and click
+                  "Verify &amp; Connect".
+                </p>
+              </Banner>
+            )}
+
+            {connectStep === "verify" && (
+              <Banner tone="success">
+                <p>
+                  Step 2: If you've installed the app on {shopDomain}, click
+                  "Verify &amp; Connect" to complete the connection. The app
+                  will use the OAuth session to sync products.
+                </p>
+              </Banner>
+            )}
           </BlockStack>
         </Modal.Section>
       </Modal>
