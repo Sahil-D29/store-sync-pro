@@ -109,32 +109,40 @@ export async function setupScheduledSync(
   syncRuleId: string,
   interval: string
 ): Promise<void> {
-  // Remove existing repeatable job
-  const repeatableJobs = await scheduledSyncQueue.getRepeatableJobs();
-  for (const job of repeatableJobs) {
-    if (job.name === `scheduled-${syncRuleId}`) {
-      await scheduledSyncQueue.removeRepeatableByKey(job.key);
+  try {
+    // Remove existing repeatable job
+    const repeatableJobs = await scheduledSyncQueue.getRepeatableJobs();
+    for (const job of repeatableJobs) {
+      if (job.name === `scheduled-${syncRuleId}`) {
+        await scheduledSyncQueue.removeRepeatableByKey(job.key);
+      }
     }
-  }
 
-  // Add new repeatable job
-  await scheduledSyncQueue.add(
-    `scheduled-${syncRuleId}`,
-    { syncRuleId } as ScheduledSyncJobData,
-    {
-      repeat: { pattern: intervalToCron(interval) },
-    }
-  );
+    // Add new repeatable job
+    await scheduledSyncQueue.add(
+      `scheduled-${syncRuleId}`,
+      { syncRuleId } as ScheduledSyncJobData,
+      {
+        repeat: { pattern: intervalToCron(interval) },
+      }
+    );
+  } catch (error) {
+    console.warn("[Queue] Redis unavailable, scheduled sync not configured:", (error as Error).message);
+  }
 }
 
 /**
  * Remove scheduled sync for a sync rule
  */
 export async function removeScheduledSync(syncRuleId: string): Promise<void> {
-  const repeatableJobs = await scheduledSyncQueue.getRepeatableJobs();
-  for (const job of repeatableJobs) {
-    if (job.name === `scheduled-${syncRuleId}`) {
-      await scheduledSyncQueue.removeRepeatableByKey(job.key);
+  try {
+    const repeatableJobs = await scheduledSyncQueue.getRepeatableJobs();
+    for (const job of repeatableJobs) {
+      if (job.name === `scheduled-${syncRuleId}`) {
+        await scheduledSyncQueue.removeRepeatableByKey(job.key);
+      }
     }
+  } catch (error) {
+    console.warn("[Queue] Redis unavailable, could not remove scheduled sync:", (error as Error).message);
   }
 }

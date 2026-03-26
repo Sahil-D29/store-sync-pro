@@ -10,11 +10,17 @@ const DEDUP_TTL = 300; // 5 minutes - Shopify retries within this window
 export async function isWebhookDuplicate(webhookId: string): Promise<boolean> {
   if (!webhookId) return false;
 
-  const key = `${DEDUP_PREFIX}${webhookId}`;
-  // SET NX returns null if key already exists
-  const result = await (redis as any).set(key, "1", "EX", DEDUP_TTL, "NX");
-  // If result is null, the key already existed => duplicate
-  return result === null;
+  try {
+    const key = `${DEDUP_PREFIX}${webhookId}`;
+    // SET NX returns null if key already exists
+    const result = await (redis as any).set(key, "1", "EX", DEDUP_TTL, "NX");
+    // If result is null, the key already existed => duplicate
+    return result === null;
+  } catch (error) {
+    // Redis not available - skip deduplication, allow webhook through
+    console.warn("[WebhookDedup] Redis unavailable, skipping dedup check:", (error as Error).message);
+    return false;
+  }
 }
 
 /**
