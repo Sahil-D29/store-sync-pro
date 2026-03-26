@@ -115,8 +115,96 @@ export async function syncProduct(
     });
 
     if (destResult.data?.productSet?.userErrors?.length) {
-      console.log(`[ProductSync] productSet userErrors:`, JSON.stringify(destResult.data.productSet.userErrors));
       const errors = destResult.data.productSet.userErrors;
+      console.log(`[ProductSync] productSet userErrors:`, JSON.stringify(errors));
+
+      // Handle HANDLE_NOT_UNIQUE: look up existing product on destination and retry as update
+      const handleError = errors.find((e: any) => e.code === "HANDLE_NOT_UNIQUE");
+      if (handleError && isNewProduct) {
+        console.log(`[ProductSync] Handle '${sourceProduct.handle}' exists on destination, looking up existing product`);
+        const lookupResult = await destClient.queryWithRetry(
+          `#graphql
+          query GetProductByHandle($handle: String!) {
+            productByHandle(handle: $handle) {
+              id
+              variants(first: 100) {
+                edges { node { id sku title } }
+              }
+            }
+          }`,
+          { handle: sourceProduct.handle }
+        );
+
+        const existingDest = lookupResult.data?.productByHandle;
+        if (existingDest) {
+          console.log(`[ProductSync] Found existing dest product ${existingDest.id}, retrying as update`);
+          // Rebuild input with the existing destination product ID
+          const retryInput = await buildProductSetInput(
+            sourceProduct,
+            syncRule,
+            existingDest.id,
+            undefined
+          );
+          const retryResult = await destClient.queryWithRetry(PRODUCT_SET_MUTATION, {
+            input: retryInput,
+            synchronous: true,
+          });
+
+          if (retryResult.data?.productSet?.userErrors?.length) {
+            console.log(`[ProductSync] Retry productSet userErrors:`, JSON.stringify(retryResult.data.productSet.userErrors));
+            return {
+              success: false,
+              action: "UPDATE",
+              sourceGid: sourceProductGid,
+              error: retryResult.data.productSet.userErrors.map((e: any) => e.message).join("; "),
+              duration: Date.now() - startTime,
+            };
+          }
+
+          const retryProduct = retryResult.data?.productSet?.product;
+          if (retryProduct) {
+            const variantMappings = buildVariantMappings(
+              sourceProduct.variants.edges,
+              retryProduct.variants.edges
+            );
+            await prisma.productMapping.upsert({
+              where: {
+                sourceStoreId_destStoreId_sourceProductGid: {
+                  sourceStoreId: syncRule.sourceStoreId,
+                  destStoreId: syncRule.destStoreId,
+                  sourceProductGid,
+                },
+              },
+              update: {
+                destProductGid: retryProduct.id,
+                variantMappings: JSON.stringify(variantMappings),
+                syncHash: currentHash,
+                status: "SYNCED",
+                lastSyncedAt: new Date(),
+              },
+              create: {
+                sourceStoreId: syncRule.sourceStoreId,
+                destStoreId: syncRule.destStoreId,
+                sourceProductGid,
+                destProductGid: retryProduct.id,
+                sourceHandle: sourceProduct.handle,
+                variantMappings: JSON.stringify(variantMappings),
+                syncHash: currentHash,
+                status: "SYNCED",
+                lastSyncedAt: new Date(),
+              },
+            });
+            return {
+              success: true,
+              action: "UPDATE",
+              sourceGid: sourceProductGid,
+              destGid: retryProduct.id,
+              duration: Date.now() - startTime,
+            };
+          }
+        }
+      }
+
       return {
         success: false,
         action: isNewProduct ? "CREATE" : "UPDATE",
