@@ -540,7 +540,7 @@ async function fetchFilteredProducts(
   while (hasNext) {
     const result: any = await sourceClient.queryWithRetry(
       `#graphql
-      query GetProducts($first: Int!, $after: String) {
+      query GetProducts($after: String) {
         products(first: 50, after: $after) {
           edges {
             node {
@@ -554,7 +554,7 @@ async function fetchFilteredProducts(
           }
         }
       }`,
-      { first: 50, after: cursor }
+      { after: cursor }
     );
 
     const products: any = result.data?.products;
