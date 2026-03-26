@@ -27,8 +27,6 @@ export const GET_PRODUCT_FOR_SYNC = `#graphql
             barcode
             price
             compareAtPrice
-            weight
-            weightUnit
             inventoryQuantity
             inventoryItem {
               id
