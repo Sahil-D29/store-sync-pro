@@ -2,14 +2,14 @@
 
 name = "Store Sync Pro"
 client_id = "c9045bbb10f21af7d4d6ffa74a720e1d"
-application_url = "https://store-sync-pro.onrender.com"
+application_url = "https://store-sync-pro-production-62d0.up.railway.app"
 embedded = true
 
 [auth]
 redirect_urls = [
-  "https://store-sync-pro.onrender.com/auth/callback",
-  "https://store-sync-pro.onrender.com/auth/shopify/callback",
-  "https://store-sync-pro.onrender.com/api/auth/callback"
+  "https://store-sync-pro-production-62d0.up.railway.app/auth/callback",
+  "https://store-sync-pro-production-62d0.up.railway.app/auth/shopify/callback",
+  "https://store-sync-pro-production-62d0.up.railway.app/api/auth/callback"
 ]
 
 [access_scopes]
