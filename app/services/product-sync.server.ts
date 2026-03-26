@@ -38,12 +38,14 @@ export async function syncProduct(
 
   try {
     // Fetch full product data from source
+    console.log(`[ProductSync] Fetching product ${sourceProductGid} from source`);
     const sourceResult = await sourceClient.queryWithRetry(
       GET_PRODUCT_FOR_SYNC,
       { id: sourceProductGid }
     );
 
     if (sourceResult.errors?.length || !sourceResult.data?.product) {
+      console.log(`[ProductSync] Failed to fetch product: ${sourceResult.errors?.[0]?.message || "Product not found"}`);
       return {
         success: false,
         action: "SKIP",
@@ -106,12 +108,14 @@ export async function syncProduct(
     );
 
     // Execute productSet on destination
+    console.log(`[ProductSync] Executing productSet on destination for ${sourceProduct.handle}`);
     const destResult = await destClient.queryWithRetry(PRODUCT_SET_MUTATION, {
       input,
       synchronous: true,
     });
 
     if (destResult.data?.productSet?.userErrors?.length) {
+      console.log(`[ProductSync] productSet userErrors:`, JSON.stringify(destResult.data.productSet.userErrors));
       const errors = destResult.data.productSet.userErrors;
       return {
         success: false,

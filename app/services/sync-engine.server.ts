@@ -339,6 +339,8 @@ export async function triggerManualSync(
   if (!rule) throw new Error("Sync rule not found");
   if (!rule.isActive) throw new Error("Sync rule is not active");
 
+  console.log(`[SyncEngine] Manual sync started for rule ${syncRuleId}, filterType=${rule.filterType}, source=${rule.sourceStore.shopDomain}, dest=${rule.destStore.shopDomain}`);
+
   const sourceClient = await createClientForStore(rule.sourceStoreId);
   const destClient = await createClientForStore(rule.destStoreId);
 
@@ -388,11 +390,13 @@ export async function triggerManualSync(
   };
 
   if (productGids?.length) {
+    console.log(`[SyncEngine] Syncing ${productGids.length} specific products`);
     for (const gid of productGids) {
       await syncOneProduct(gid);
     }
   } else {
     const products = await fetchFilteredProducts(rule, sourceClient);
+    console.log(`[SyncEngine] fetchFilteredProducts returned ${products.length} products`);
     for (const productGid of products) {
       await syncOneProduct(productGid);
     }
@@ -454,9 +458,72 @@ async function fetchFilteredProducts(
   rule: SyncRule & { sourceStore: ConnectedStore },
   sourceClient: any
 ): Promise<string[]> {
-  const productGids: string[] = [];
+  // For SELECTED_PRODUCTS, return the stored product GIDs directly
+  if (rule.filterType === "SELECTED_PRODUCTS") {
+    if (!rule.filterProductIds) {
+      console.log(`[SyncEngine] SELECTED_PRODUCTS filter but no filterProductIds set`);
+      return [];
+    }
+    try {
+      const ids: string[] = JSON.parse(rule.filterProductIds);
+      console.log(`[SyncEngine] SELECTED_PRODUCTS: ${ids.length} products selected`);
+      return ids;
+    } catch (e) {
+      console.error(`[SyncEngine] Failed to parse filterProductIds:`, e);
+      return [];
+    }
+  }
 
-  // Paginate through products
+  // For SELECTED_COLLECTIONS, fetch products from those collections
+  if (rule.filterType === "SELECTED_COLLECTIONS" && rule.filterCollectionIds) {
+    const collectionIds: string[] = JSON.parse(rule.filterCollectionIds);
+    const productGids: string[] = [];
+    const seen = new Set<string>();
+
+    for (const collectionGid of collectionIds) {
+      let hasNext = true;
+      let cursor: string | null = null;
+
+      while (hasNext) {
+        const result: any = await sourceClient.queryWithRetry(
+          `#graphql
+          query GetCollectionProducts($id: ID!, $first: Int!, $after: String) {
+            collection(id: $id) {
+              products(first: 50, after: $after) {
+                edges {
+                  node { id }
+                }
+                pageInfo {
+                  hasNextPage
+                  endCursor
+                }
+              }
+            }
+          }`,
+          { id: collectionGid, first: 50, after: cursor }
+        );
+
+        const products = result.data?.collection?.products;
+        if (!products) break;
+
+        for (const edge of products.edges) {
+          if (!seen.has(edge.node.id)) {
+            seen.add(edge.node.id);
+            productGids.push(edge.node.id);
+          }
+        }
+
+        hasNext = products.pageInfo.hasNextPage;
+        cursor = products.pageInfo.endCursor;
+      }
+    }
+
+    console.log(`[SyncEngine] SELECTED_COLLECTIONS: ${productGids.length} products from ${collectionIds.length} collections`);
+    return productGids;
+  }
+
+  // For ALL or BY_TAGS, paginate through all products
+  const productGids: string[] = [];
   let hasNext = true;
   let cursor: string | null = null;
 
@@ -481,7 +548,10 @@ async function fetchFilteredProducts(
     );
 
     const products: any = result.data?.products;
-    if (!products) break;
+    if (!products) {
+      console.log(`[SyncEngine] No products data in API response`, JSON.stringify(result.errors || 'no errors'));
+      break;
+    }
 
     for (const edge of products.edges) {
       const product = edge.node;
@@ -501,5 +571,6 @@ async function fetchFilteredProducts(
     cursor = products.pageInfo.endCursor;
   }
 
+  console.log(`[SyncEngine] Filter ${rule.filterType}: found ${productGids.length} products`);
   return productGids;
 }
