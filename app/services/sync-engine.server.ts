@@ -460,66 +460,76 @@ async function fetchFilteredProducts(
 ): Promise<string[]> {
   // For SELECTED_PRODUCTS, return the stored product GIDs directly
   if (rule.filterType === "SELECTED_PRODUCTS") {
-    if (!rule.filterProductIds) {
-      console.log(`[SyncEngine] SELECTED_PRODUCTS filter but no filterProductIds set`);
-      return [];
+    if (rule.filterProductIds) {
+      try {
+        const ids: string[] = JSON.parse(rule.filterProductIds);
+        if (ids.length > 0) {
+          console.log(`[SyncEngine] SELECTED_PRODUCTS: ${ids.length} products selected`);
+          return ids;
+        }
+      } catch (e) {
+        console.error(`[SyncEngine] Failed to parse filterProductIds:`, e);
+      }
     }
-    try {
-      const ids: string[] = JSON.parse(rule.filterProductIds);
-      console.log(`[SyncEngine] SELECTED_PRODUCTS: ${ids.length} products selected`);
-      return ids;
-    } catch (e) {
-      console.error(`[SyncEngine] Failed to parse filterProductIds:`, e);
-      return [];
-    }
+    // Fallback: no products selected yet, sync ALL products from source
+    console.log(`[SyncEngine] SELECTED_PRODUCTS filter but no filterProductIds set, falling back to ALL products`);
   }
 
   // For SELECTED_COLLECTIONS, fetch products from those collections
   if (rule.filterType === "SELECTED_COLLECTIONS" && rule.filterCollectionIds) {
-    const collectionIds: string[] = JSON.parse(rule.filterCollectionIds);
-    const productGids: string[] = [];
-    const seen = new Set<string>();
-
-    for (const collectionGid of collectionIds) {
-      let hasNext = true;
-      let cursor: string | null = null;
-
-      while (hasNext) {
-        const result: any = await sourceClient.queryWithRetry(
-          `#graphql
-          query GetCollectionProducts($id: ID!, $first: Int!, $after: String) {
-            collection(id: $id) {
-              products(first: 50, after: $after) {
-                edges {
-                  node { id }
-                }
-                pageInfo {
-                  hasNextPage
-                  endCursor
-                }
-              }
-            }
-          }`,
-          { id: collectionGid, first: 50, after: cursor }
-        );
-
-        const products = result.data?.collection?.products;
-        if (!products) break;
-
-        for (const edge of products.edges) {
-          if (!seen.has(edge.node.id)) {
-            seen.add(edge.node.id);
-            productGids.push(edge.node.id);
-          }
-        }
-
-        hasNext = products.pageInfo.hasNextPage;
-        cursor = products.pageInfo.endCursor;
-      }
+    let collectionIds: string[] = [];
+    try {
+      collectionIds = JSON.parse(rule.filterCollectionIds);
+    } catch (e) {
+      console.error(`[SyncEngine] Failed to parse filterCollectionIds:`, e);
     }
 
-    console.log(`[SyncEngine] SELECTED_COLLECTIONS: ${productGids.length} products from ${collectionIds.length} collections`);
-    return productGids;
+    if (collectionIds.length > 0) {
+      const productGids: string[] = [];
+      const seen = new Set<string>();
+
+      for (const collectionGid of collectionIds) {
+        let hasNext = true;
+        let cursor: string | null = null;
+
+        while (hasNext) {
+          const result: any = await sourceClient.queryWithRetry(
+            `#graphql
+            query GetCollectionProducts($id: ID!, $first: Int!, $after: String) {
+              collection(id: $id) {
+                products(first: 50, after: $after) {
+                  edges {
+                    node { id }
+                  }
+                  pageInfo {
+                    hasNextPage
+                    endCursor
+                  }
+                }
+              }
+            }`,
+            { id: collectionGid, first: 50, after: cursor }
+          );
+
+          const products = result.data?.collection?.products;
+          if (!products) break;
+
+          for (const edge of products.edges) {
+            if (!seen.has(edge.node.id)) {
+              seen.add(edge.node.id);
+              productGids.push(edge.node.id);
+            }
+          }
+
+          hasNext = products.pageInfo.hasNextPage;
+          cursor = products.pageInfo.endCursor;
+        }
+      }
+
+      console.log(`[SyncEngine] SELECTED_COLLECTIONS: ${productGids.length} products from ${collectionIds.length} collections`);
+      return productGids;
+    }
+    console.log(`[SyncEngine] SELECTED_COLLECTIONS filter but no collections set, falling back to ALL products`);
   }
 
   // For ALL or BY_TAGS, paginate through all products
