@@ -1,7 +1,7 @@
 import { useState, useCallback } from "react";
 import type { ActionFunctionArgs, LoaderFunctionArgs } from "@remix-run/node";
 import { json } from "@remix-run/node";
-import { useLoaderData, useSubmit, useNavigation } from "@remix-run/react";
+import { useLoaderData, useSubmit, useNavigation, useFetcher, useRouteError, isRouteErrorResponse } from "@remix-run/react";
 import {
   Page,
   Card,
@@ -49,7 +49,7 @@ const DEFAULT_FORM = {
 };
 
 export const loader = async ({ request }: LoaderFunctionArgs) => {
-  await authenticate.admin(request);
+  const { admin } = await authenticate.admin(request);
 
   const [syncRules, stores, priceRules] = await Promise.all([
     prisma.syncRule.findMany({
@@ -75,7 +75,7 @@ export const loader = async ({ request }: LoaderFunctionArgs) => {
   return json({
     syncRules: syncRules.map((r) => ({
       ...r,
-      lastRunAt: r.lastRunAt?.toISOString(),
+      lastRunAt: r.lastRunAt?.toISOString() || null,
       createdAt: r.createdAt.toISOString(),
       updatedAt: r.updatedAt.toISOString(),
     })),
@@ -197,8 +197,9 @@ export const action = async ({ request }: ActionFunctionArgs) => {
 export default function SyncRulesPage() {
   const { syncRules, stores, priceRules } = useLoaderData<typeof loader>();
   const submit = useSubmit();
+  const fetcher = useFetcher();
   const navigation = useNavigation();
-  const isSubmitting = navigation.state === "submitting";
+  const isSubmitting = navigation.state === "submitting" || fetcher.state === "submitting";
 
   const [modalMode, setModalMode] = useState<"create" | "edit" | null>(null);
   const [editRuleId, setEditRuleId] = useState<string | null>(null);
@@ -263,7 +264,7 @@ export default function SyncRulesPage() {
         data.set(key, String(value));
       }
     });
-    submit(data, { method: "POST" });
+    fetcher.submit(data, { method: "POST" });
     setModalMode(null);
   };
 
@@ -279,7 +280,7 @@ export default function SyncRulesPage() {
   };
 
   const handleSyncNow = (ruleId: string) => {
-    submit({ intent: "sync-now", ruleId }, { method: "POST" });
+    fetcher.submit({ intent: "sync-now", ruleId }, { method: "POST" });
   };
 
   const openProductPicker = useCallback(async () => {
@@ -388,6 +389,16 @@ export default function SyncRulesPage() {
       </TitleBar>
 
       <BlockStack gap="500">
+        {fetcher.data?.error && (
+          <Banner tone="critical" title="Error">
+            <p>{fetcher.data.error}</p>
+          </Banner>
+        )}
+        {fetcher.data?.success && fetcher.data?.queued !== undefined && (
+          <Banner tone="success" title="Sync complete">
+            <p>Synced {fetcher.data.queued} products. {fetcher.data.errors?.length > 0 ? `${fetcher.data.errors.length} errors occurred.` : ""}</p>
+          </Banner>
+        )}
         {syncRules.length === 0 ? (
           <Card>
             <BlockStack gap="300" inlineAlign="center">
@@ -696,6 +707,45 @@ export default function SyncRulesPage() {
           </BlockStack>
         </Modal.Section>
       </Modal>
+    </Page>
+  );
+}
+
+export function ErrorBoundary() {
+  const error = useRouteError();
+
+  if (isRouteErrorResponse(error)) {
+    return (
+      <Page title="Sync Rules - Error">
+        <Card>
+          <BlockStack gap="300">
+            <Text as="h2" variant="headingMd">
+              Error {error.status}
+            </Text>
+            <Text as="p">{error.statusText || "An error occurred"}</Text>
+            <Text as="p" tone="subdued">
+              {typeof error.data === "string" ? error.data : JSON.stringify(error.data)}
+            </Text>
+            <Button url="/app/sync-rules">Reload page</Button>
+          </BlockStack>
+        </Card>
+      </Page>
+    );
+  }
+
+  return (
+    <Page title="Sync Rules - Error">
+      <Card>
+        <BlockStack gap="300">
+          <Text as="h2" variant="headingMd">
+            Something went wrong
+          </Text>
+          <Text as="p" tone="subdued">
+            {error instanceof Error ? error.message : "Unknown error"}
+          </Text>
+          <Button url="/app/sync-rules">Reload page</Button>
+        </BlockStack>
+      </Card>
     </Page>
   );
 }
