@@ -263,8 +263,38 @@ export async function refreshStoreConnection(storeId: string): Promise<{
 
   if (!store) return { success: false, error: "Store not found" };
 
-  const token = decrypt(store.accessToken);
-  const validation = await validateStoreToken(store.shopDomain, token);
+  // First, try to get a fresh token from the Session table (handles token rotation)
+  const offlineSession = await prisma.session.findFirst({
+    where: {
+      shop: store.shopDomain,
+      isOnline: false,
+    },
+    orderBy: { id: "desc" },
+  });
+
+  let tokenToValidate = decrypt(store.accessToken);
+
+  // If we found a session token that differs from stored, try the session token first
+  if (offlineSession?.accessToken && offlineSession.accessToken !== tokenToValidate) {
+    const sessionValidation = await validateStoreToken(store.shopDomain, offlineSession.accessToken);
+    if (sessionValidation.valid) {
+      // Session token works — update the stored token
+      const encryptedToken = encrypt(offlineSession.accessToken);
+      await prisma.connectedStore.update({
+        where: { id: storeId },
+        data: {
+          accessToken: encryptedToken,
+          status: "ACTIVE",
+          shopName: sessionValidation.shopName || store.shopName,
+          currencyCode: sessionValidation.currencyCode || store.currencyCode,
+        },
+      });
+      return { success: true };
+    }
+  }
+
+  // Fall back to validating the stored token
+  const validation = await validateStoreToken(store.shopDomain, tokenToValidate);
 
   if (!validation.valid) {
     await prisma.connectedStore.update({

@@ -49,7 +49,20 @@ const DEFAULT_FORM = {
 };
 
 export const loader = async ({ request }: LoaderFunctionArgs) => {
-  const { admin } = await authenticate.admin(request);
+  const { session } = await authenticate.admin(request);
+
+  // Keep ConnectedStore tokens fresh from the active Shopify session
+  if (session?.shop && session?.accessToken) {
+    try {
+      const { encrypt } = await import("../utils/encryption.server");
+      await prisma.connectedStore.updateMany({
+        where: { shopDomain: session.shop },
+        data: { accessToken: encrypt(session.accessToken) },
+      });
+    } catch (e) {
+      console.warn("[SyncRules] Token refresh failed:", (e as Error).message);
+    }
+  }
 
   const [syncRules, stores, priceRules] = await Promise.all([
     prisma.syncRule.findMany({
@@ -85,7 +98,22 @@ export const loader = async ({ request }: LoaderFunctionArgs) => {
 };
 
 export const action = async ({ request }: ActionFunctionArgs) => {
-  await authenticate.admin(request);
+  const { session } = await authenticate.admin(request);
+
+  // Keep ConnectedStore tokens fresh from the active Shopify session
+  if (session?.shop && session?.accessToken) {
+    try {
+      const { encrypt } = await import("../utils/encryption.server");
+      await prisma.connectedStore.updateMany({
+        where: { shopDomain: session.shop },
+        data: { accessToken: encrypt(session.accessToken) },
+      });
+    } catch (e) {
+      // Non-critical: token refresh failed, continue with action
+      console.warn("[SyncRules] Token refresh failed:", (e as Error).message);
+    }
+  }
+
   const formData = await request.formData();
   const intent = formData.get("intent") as string;
 
