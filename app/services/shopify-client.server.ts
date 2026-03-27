@@ -195,7 +195,9 @@ export async function validateStoreToken(
 }
 
 /**
- * Create a GraphQL client for a ConnectedStore by ID
+ * Create a GraphQL client for a ConnectedStore by ID.
+ * For stores connected via OAuth, tries the Shopify session storage first
+ * (which has the latest rotated token), falling back to the stored token.
  */
 export async function createClientForStore(
   storeId: string
@@ -212,6 +214,21 @@ export async function createClientForStore(
     throw new Error(`Store is disconnected: ${store.shopDomain}`);
   }
 
+  // Try to get the latest token from Shopify's session storage
+  // This handles token rotation from expiringOfflineAccessTokens
+  const offlineSession = await prisma.session.findFirst({
+    where: {
+      shop: store.shopDomain,
+      isOnline: false,
+    },
+    orderBy: { id: "desc" },
+  });
+
+  if (offlineSession?.accessToken) {
+    return new ShopifyGraphQLClient(store.shopDomain, offlineSession.accessToken);
+  }
+
+  // Fallback to the stored encrypted token (for manual token entry stores)
   const token = decrypt(store.accessToken);
   return new ShopifyGraphQLClient(store.shopDomain, token);
 }
