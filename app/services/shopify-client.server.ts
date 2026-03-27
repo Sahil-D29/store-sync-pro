@@ -214,27 +214,31 @@ export async function createClientForStore(
     throw new Error(`Store is disconnected: ${store.shopDomain}`);
   }
 
-  // Try to get the freshest offline token from the Session table
+  // Try to get the freshest token from the Session table
   // (PrismaSessionStorage keeps this updated on each auth)
-  // Shopify stores offline sessions with id = "offline_<shop-domain>"
-  const offlineSessionById = await prisma.session.findUnique({
+  // Strategy: try offline session first (id = "offline_<shop>"), then any session for this shop
+  const offlineSession = await prisma.session.findUnique({
     where: { id: `offline_${store.shopDomain}` },
   });
 
-  // Also try querying by shop + isOnline flag as fallback
-  const offlineSessionByShop = !offlineSessionById ? await prisma.session.findFirst({
-    where: {
-      shop: store.shopDomain,
-      isOnline: false,
-    },
-    orderBy: { id: "desc" },
-  }) : null;
-
-  const offlineSession = offlineSessionById || offlineSessionByShop;
-
   if (offlineSession?.accessToken) {
-    console.log(`[ClientFactory] Using Session table token for ${store.shopDomain} (id=${offlineSession.id}, expires=${offlineSession.expires})`);
+    console.log(`[ClientFactory] Using offline session token for ${store.shopDomain} (expires=${offlineSession.expires})`);
     return new ShopifyGraphQLClient(store.shopDomain, offlineSession.accessToken);
+  }
+
+  // Fallback: find ANY session for this shop (online sessions from token exchange)
+  const anySession = await prisma.session.findFirst({
+    where: { shop: store.shopDomain },
+    orderBy: { id: "desc" },
+  });
+
+  if (anySession?.accessToken) {
+    const isExpired = anySession.expires && new Date(anySession.expires) < new Date();
+    console.log(`[ClientFactory] Using session token for ${store.shopDomain} (id=${anySession.id}, isOnline=${anySession.isOnline}, expires=${anySession.expires}, expired=${isExpired})`);
+    if (!isExpired) {
+      return new ShopifyGraphQLClient(store.shopDomain, anySession.accessToken);
+    }
+    console.log(`[ClientFactory] Session token expired for ${store.shopDomain}, falling back to ConnectedStore token`);
   }
 
   // Fallback to the ConnectedStore's encrypted token

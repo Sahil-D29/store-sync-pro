@@ -1,6 +1,6 @@
 import type { SyncRule, ConnectedStore, PriceRule } from "@prisma/client";
 import prisma from "../db.server";
-import { createClientForStore } from "./shopify-client.server";
+import { createClientForStore, ShopifyGraphQLClient } from "./shopify-client.server";
 import { syncProduct, deleteProductOnDestination } from "./product-sync.server";
 import { syncCollection, deleteCollectionOnDestination } from "./collection-sync.server";
 import { syncProductInventory, syncInventoryItem } from "./inventory-sync.server";
@@ -329,7 +329,8 @@ async function syncProductExtras(
  */
 export async function triggerManualSync(
   syncRuleId: string,
-  productGids?: string[]
+  productGids?: string[],
+  currentSession?: { shop: string; accessToken: string }
 ): Promise<{ queued: number; errors: string[] }> {
   const rule = await prisma.syncRule.findUnique({
     where: { id: syncRuleId },
@@ -341,8 +342,23 @@ export async function triggerManualSync(
 
   console.log(`[SyncEngine] Manual sync started for rule ${syncRuleId}, filterType=${rule.filterType}, source=${rule.sourceStore.shopDomain}, dest=${rule.destStore.shopDomain}`);
 
-  const sourceClient = await createClientForStore(rule.sourceStoreId);
-  const destClient = await createClientForStore(rule.destStoreId);
+  // Use the current authenticated session token directly if it matches source or dest store
+  let sourceClient: ShopifyGraphQLClient;
+  let destClient: ShopifyGraphQLClient;
+
+  if (currentSession?.accessToken && currentSession.shop === rule.sourceStore.shopDomain) {
+    console.log(`[SyncEngine] Using direct session token for source store ${currentSession.shop}`);
+    sourceClient = new ShopifyGraphQLClient(currentSession.shop, currentSession.accessToken);
+  } else {
+    sourceClient = await createClientForStore(rule.sourceStoreId);
+  }
+
+  if (currentSession?.accessToken && currentSession.shop === rule.destStore.shopDomain) {
+    console.log(`[SyncEngine] Using direct session token for dest store ${currentSession.shop}`);
+    destClient = new ShopifyGraphQLClient(currentSession.shop, currentSession.accessToken);
+  } else {
+    destClient = await createClientForStore(rule.destStoreId);
+  }
 
   const errors: string[] = [];
   let queued = 0;

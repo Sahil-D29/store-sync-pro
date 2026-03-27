@@ -229,7 +229,13 @@ export const action = async ({ request }: ActionFunctionArgs) => {
           console.log(`[SyncNow] Current auth session: shop=${session?.shop}, hasToken=${!!session?.accessToken}`);
         }
 
-        const result = await triggerManualSync(ruleId);
+        const result = await triggerManualSync(
+          ruleId,
+          undefined,
+          session?.shop && session?.accessToken
+            ? { shop: session.shop, accessToken: session.accessToken }
+            : undefined
+        );
         return json({ success: true, ...result });
       } catch (error) {
         return json({ error: (error as Error).message }, { status: 400 });
