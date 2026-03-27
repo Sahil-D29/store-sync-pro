@@ -1,5 +1,5 @@
 import { Queue, Worker, type Job } from "bullmq";
-import redis from "../redis.server";
+import redis, { isRedisAvailable } from "../redis.server";
 
 // ===== QUEUE DEFINITIONS =====
 
@@ -111,7 +111,7 @@ export async function setupScheduledSync(
   syncRuleId: string,
   interval: string
 ): Promise<void> {
-  if (!scheduledSyncQueue) {
+  if (!scheduledSyncQueue || !isRedisAvailable()) {
     console.warn("[Queue] Redis unavailable, scheduled sync not configured");
     return;
   }
@@ -139,7 +139,7 @@ export async function setupScheduledSync(
  * Remove scheduled sync for a sync rule
  */
 export async function removeScheduledSync(syncRuleId: string): Promise<void> {
-  if (!scheduledSyncQueue) {
+  if (!scheduledSyncQueue || !isRedisAvailable()) {
     console.warn("[Queue] Redis unavailable, could not remove scheduled sync");
     return;
   }
