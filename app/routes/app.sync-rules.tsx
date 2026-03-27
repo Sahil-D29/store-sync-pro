@@ -210,6 +210,25 @@ export const action = async ({ request }: ActionFunctionArgs) => {
     case "sync-now": {
       const ruleId = formData.get("ruleId") as string;
       try {
+        // Log token state for debugging
+        const rule = await prisma.syncRule.findUnique({
+          where: { id: ruleId },
+          include: { sourceStore: true, destStore: true },
+        });
+        if (rule) {
+          const srcSession = await prisma.session.findFirst({
+            where: { shop: rule.sourceStore.shopDomain, isOnline: false },
+            orderBy: { id: "desc" },
+          });
+          const destSession = await prisma.session.findFirst({
+            where: { shop: rule.destStore.shopDomain, isOnline: false },
+            orderBy: { id: "desc" },
+          });
+          console.log(`[SyncNow] Source ${rule.sourceStore.shopDomain}: session token exists=${!!srcSession?.accessToken}, session id=${srcSession?.id || 'none'}`);
+          console.log(`[SyncNow] Dest ${rule.destStore.shopDomain}: session token exists=${!!destSession?.accessToken}, session id=${destSession?.id || 'none'}`);
+          console.log(`[SyncNow] Current auth session: shop=${session?.shop}, hasToken=${!!session?.accessToken}`);
+        }
+
         const result = await triggerManualSync(ruleId);
         return json({ success: true, ...result });
       } catch (error) {

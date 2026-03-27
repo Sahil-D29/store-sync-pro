@@ -196,8 +196,8 @@ export async function validateStoreToken(
 
 /**
  * Create a GraphQL client for a ConnectedStore by ID.
- * Tokens are kept fresh by route handlers calling refreshStoreToken()
- * after authenticate.admin() succeeds.
+ * Tries the freshest offline session token first (from Shopify's PrismaSessionStorage),
+ * falling back to the ConnectedStore's stored encrypted token.
  */
 export async function createClientForStore(
   storeId: string
@@ -214,6 +214,31 @@ export async function createClientForStore(
     throw new Error(`Store is disconnected: ${store.shopDomain}`);
   }
 
+  // Try to get the freshest offline token from the Session table
+  // (PrismaSessionStorage keeps this updated on each auth)
+  // Shopify stores offline sessions with id = "offline_<shop-domain>"
+  const offlineSessionById = await prisma.session.findUnique({
+    where: { id: `offline_${store.shopDomain}` },
+  });
+
+  // Also try querying by shop + isOnline flag as fallback
+  const offlineSessionByShop = !offlineSessionById ? await prisma.session.findFirst({
+    where: {
+      shop: store.shopDomain,
+      isOnline: false,
+    },
+    orderBy: { id: "desc" },
+  }) : null;
+
+  const offlineSession = offlineSessionById || offlineSessionByShop;
+
+  if (offlineSession?.accessToken) {
+    console.log(`[ClientFactory] Using Session table token for ${store.shopDomain} (id=${offlineSession.id}, expires=${offlineSession.expires})`);
+    return new ShopifyGraphQLClient(store.shopDomain, offlineSession.accessToken);
+  }
+
+  // Fallback to the ConnectedStore's encrypted token
+  console.log(`[ClientFactory] Using ConnectedStore token for ${store.shopDomain} (no offline session found)`);
   const token = decrypt(store.accessToken);
   return new ShopifyGraphQLClient(store.shopDomain, token);
 }
