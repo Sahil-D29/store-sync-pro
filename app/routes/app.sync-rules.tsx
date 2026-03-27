@@ -137,24 +137,29 @@ export const action = async ({ request }: ActionFunctionArgs) => {
         return json({ error: "Name is required" }, { status: 400 });
       }
 
-      // Remove source/dest store IDs from update (can't change stores)
-      const { sourceStoreId, destStoreId, ...updateData } = data;
+      try {
+        // Remove source/dest store IDs from update (can't change stores)
+        const { sourceStoreId, destStoreId, ...updateData } = data;
 
-      await prisma.syncRule.update({
-        where: { id: ruleId },
-        data: updateData,
-      });
+        await prisma.syncRule.update({
+          where: { id: ruleId },
+          data: updateData,
+        });
 
-      // Update scheduled sync
-      await removeScheduledSync(ruleId);
-      if (
-        updateData.scheduleInterval &&
-        (updateData.syncMode === "SCHEDULED" || updateData.syncMode === "REALTIME_AND_SCHEDULED")
-      ) {
-        await setupScheduledSync(ruleId, updateData.scheduleInterval);
+        // Update scheduled sync
+        await removeScheduledSync(ruleId);
+        if (
+          updateData.scheduleInterval &&
+          (updateData.syncMode === "SCHEDULED" || updateData.syncMode === "REALTIME_AND_SCHEDULED")
+        ) {
+          await setupScheduledSync(ruleId, updateData.scheduleInterval);
+        }
+
+        return json({ success: true });
+      } catch (error) {
+        console.error("[SyncRules] Update error:", error);
+        return json({ error: (error as Error).message }, { status: 400 });
       }
-
-      return json({ success: true });
     }
 
     case "toggle": {
