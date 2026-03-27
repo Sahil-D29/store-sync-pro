@@ -347,13 +347,14 @@ export async function triggerManualSync(
   const errors: string[] = [];
   let queued = 0;
 
-  // Helper to sync a single product + extras
+  // Helper to sync a single product + extras (force=true to skip hash check on manual sync)
   const syncOneProduct = async (gid: string) => {
     const result = await syncProduct(
       rule as SyncRuleWithRelations,
       gid,
       sourceClient,
-      destClient
+      destClient,
+      true // forceSync - manual sync always forces re-sync
     );
 
     // Sync extras after successful product sync

@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useState, useCallback } from "react";
 import type { ActionFunctionArgs, LoaderFunctionArgs } from "@remix-run/node";
 import { json } from "@remix-run/node";
 import { useLoaderData, useSubmit, useNavigation } from "@remix-run/react";
@@ -18,6 +18,7 @@ import {
   Divider,
   IndexTable,
   Banner,
+  Tag,
 } from "@shopify/polaris";
 import { TitleBar } from "@shopify/app-bridge-react";
 import { authenticate } from "../shopify.server";
@@ -34,6 +35,8 @@ const DEFAULT_FORM = {
   priceRuleId: "",
   filterType: "ALL",
   filterTags: "",
+  filterProductIds: [] as Array<{ id: string; title: string }>,
+  filterCollectionIds: [] as Array<{ id: string; title: string }>,
   destProductStatus: "SAME_AS_SOURCE",
   syncProducts: true,
   syncVariants: true,
@@ -95,6 +98,8 @@ export const action = async ({ request }: ActionFunctionArgs) => {
     priceRuleId: (fd.get("priceRuleId") as string) || null,
     filterType: (fd.get("filterType") as any) || "ALL",
     filterTags: (fd.get("filterTags") as string) || null,
+    filterProductIds: (fd.get("filterProductIds") as string) || null,
+    filterCollectionIds: (fd.get("filterCollectionIds") as string) || null,
     destProductStatus: (fd.get("destProductStatus") as any) || "SAME_AS_SOURCE",
     syncProducts: fd.get("syncProducts") === "true",
     syncVariants: fd.get("syncVariants") === "true",
@@ -204,6 +209,15 @@ export default function SyncRulesPage() {
   };
 
   const openEditModal = (rule: any) => {
+    let filterProductIds: Array<{ id: string; title: string }> = [];
+    let filterCollectionIds: Array<{ id: string; title: string }> = [];
+    try {
+      if (rule.filterProductIds) filterProductIds = JSON.parse(rule.filterProductIds).map((id: string) => ({ id, title: id.replace("gid://shopify/Product/", "Product #") }));
+    } catch {}
+    try {
+      if (rule.filterCollectionIds) filterCollectionIds = JSON.parse(rule.filterCollectionIds).map((id: string) => ({ id, title: id.replace("gid://shopify/Collection/", "Collection #") }));
+    } catch {}
+
     setFormData({
       name: rule.name,
       sourceStoreId: rule.sourceStoreId,
@@ -213,6 +227,8 @@ export default function SyncRulesPage() {
       priceRuleId: rule.priceRuleId || "",
       filterType: rule.filterType,
       filterTags: rule.filterTags || "",
+      filterProductIds,
+      filterCollectionIds,
       destProductStatus: rule.destProductStatus,
       syncProducts: rule.syncProducts,
       syncVariants: rule.syncVariants,
@@ -232,7 +248,15 @@ export default function SyncRulesPage() {
     data.set("intent", modalMode === "edit" ? "update" : "create");
     if (editRuleId) data.set("ruleId", editRuleId);
     Object.entries(formData).forEach(([key, value]) => {
-      data.set(key, String(value));
+      if (key === "filterProductIds") {
+        const ids = (value as Array<{ id: string }>).map((p) => p.id);
+        data.set(key, ids.length > 0 ? JSON.stringify(ids) : "");
+      } else if (key === "filterCollectionIds") {
+        const ids = (value as Array<{ id: string }>).map((c) => c.id);
+        data.set(key, ids.length > 0 ? JSON.stringify(ids) : "");
+      } else {
+        data.set(key, String(value));
+      }
     });
     submit(data, { method: "POST" });
     setModalMode(null);
@@ -252,6 +276,58 @@ export default function SyncRulesPage() {
   const handleSyncNow = (ruleId: string) => {
     submit({ intent: "sync-now", ruleId }, { method: "POST" });
   };
+
+  const openProductPicker = useCallback(async () => {
+    try {
+      const selected = await (window as any).shopify.resourcePicker({
+        type: "product",
+        action: "select",
+        multiple: true,
+        selectionIds: formData.filterProductIds.map((p) => ({ id: p.id })),
+      });
+      if (selected) {
+        setFormData((prev) => ({
+          ...prev,
+          filterProductIds: selected.map((p: any) => ({ id: p.id, title: p.title })),
+        }));
+      }
+    } catch (e) {
+      console.error("Product picker error:", e);
+    }
+  }, [formData.filterProductIds]);
+
+  const openCollectionPicker = useCallback(async () => {
+    try {
+      const selected = await (window as any).shopify.resourcePicker({
+        type: "collection",
+        action: "select",
+        multiple: true,
+        selectionIds: formData.filterCollectionIds.map((c) => ({ id: c.id })),
+      });
+      if (selected) {
+        setFormData((prev) => ({
+          ...prev,
+          filterCollectionIds: selected.map((c: any) => ({ id: c.id, title: c.title })),
+        }));
+      }
+    } catch (e) {
+      console.error("Collection picker error:", e);
+    }
+  }, [formData.filterCollectionIds]);
+
+  const removeSelectedProduct = useCallback((idToRemove: string) => {
+    setFormData((prev) => ({
+      ...prev,
+      filterProductIds: prev.filterProductIds.filter((p) => p.id !== idToRemove),
+    }));
+  }, []);
+
+  const removeSelectedCollection = useCallback((idToRemove: string) => {
+    setFormData((prev) => ({
+      ...prev,
+      filterCollectionIds: prev.filterCollectionIds.filter((c) => c.id !== idToRemove),
+    }));
+  }, []);
 
   const renderSyncToggles = () => (
     <InlineStack gap="400" wrap>
@@ -520,17 +596,47 @@ export default function SyncRulesPage() {
             )}
 
             {formData.filterType === "SELECTED_COLLECTIONS" && (
-              <Banner tone="info">
-                After creating the rule, go to the Collections page to select which
-                collections to include in this sync.
-              </Banner>
+              <BlockStack gap="300">
+                <Button onClick={openCollectionPicker}>
+                  {formData.filterCollectionIds.length > 0 ? "Change collections" : "Select collections"}
+                </Button>
+                {formData.filterCollectionIds.length > 0 && (
+                  <InlineStack gap="200" wrap>
+                    {formData.filterCollectionIds.map((c) => (
+                      <Tag key={c.id} onRemove={() => removeSelectedCollection(c.id)}>
+                        {c.title}
+                      </Tag>
+                    ))}
+                  </InlineStack>
+                )}
+                {formData.filterCollectionIds.length === 0 && (
+                  <Text as="p" tone="subdued" variant="bodySm">
+                    No collections selected. Click above to choose collections.
+                  </Text>
+                )}
+              </BlockStack>
             )}
 
             {formData.filterType === "SELECTED_PRODUCTS" && (
-              <Banner tone="info">
-                After creating the rule, use the Bulk Sync page to trigger a sync
-                for specific products.
-              </Banner>
+              <BlockStack gap="300">
+                <Button onClick={openProductPicker}>
+                  {formData.filterProductIds.length > 0 ? "Change products" : "Select products"}
+                </Button>
+                {formData.filterProductIds.length > 0 && (
+                  <InlineStack gap="200" wrap>
+                    {formData.filterProductIds.map((p) => (
+                      <Tag key={p.id} onRemove={() => removeSelectedProduct(p.id)}>
+                        {p.title}
+                      </Tag>
+                    ))}
+                  </InlineStack>
+                )}
+                {formData.filterProductIds.length === 0 && (
+                  <Text as="p" tone="subdued" variant="bodySm">
+                    No products selected. Click above to choose products.
+                  </Text>
+                )}
+              </BlockStack>
             )}
 
             <Divider />

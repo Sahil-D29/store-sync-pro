@@ -32,7 +32,8 @@ export async function syncProduct(
   syncRule: SyncRuleWithRelations,
   sourceProductGid: string,
   sourceClient: ShopifyGraphQLClient,
-  destClient: ShopifyGraphQLClient
+  destClient: ShopifyGraphQLClient,
+  forceSync: boolean = false
 ): Promise<SyncProductResult> {
   const startTime = Date.now();
 
@@ -70,7 +71,7 @@ export async function syncProduct(
       },
     });
 
-    if (existingMapping?.syncHash === currentHash && existingMapping.destProductGid) {
+    if (!forceSync && existingMapping?.syncHash === currentHash && existingMapping.destProductGid) {
       return {
         success: true,
         action: "SKIP",
