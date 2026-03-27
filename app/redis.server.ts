@@ -19,6 +19,11 @@ function createRedisConnection(): IORedis {
     lazyConnect: true,
   });
 
+  // Prevent unhandled 'error' events from crashing the process
+  connection.on("error", (err) => {
+    console.warn("Redis error:", err.message);
+  });
+
   connection.connect().catch((err) => {
     console.warn("Redis not available:", err.message);
     console.warn("Background sync jobs (queues) will not work. App UI will still function.");

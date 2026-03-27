@@ -3,53 +3,55 @@ import redis from "../redis.server";
 
 // ===== QUEUE DEFINITIONS =====
 
-export const syncProductQueue = new Queue("sync-product", {
-  connection: redis as any,
-  defaultJobOptions: {
-    attempts: 3,
-    backoff: { type: "exponential", delay: 2000 },
-    removeOnComplete: { count: 1000 },
-    removeOnFail: { count: 5000 },
-  },
+function createQueue(name: string, opts: any): Queue | null {
+  try {
+    const queue = new Queue(name, {
+      connection: redis as any,
+      defaultJobOptions: opts,
+    });
+    // Prevent unhandled 'error' events from crashing the process
+    queue.on("error", (err) => {
+      console.warn(`[Queue:${name}] Error:`, err.message);
+    });
+    return queue;
+  } catch (err) {
+    console.warn(`[Queue] Failed to create queue ${name}:`, (err as Error).message);
+    return null;
+  }
+}
+
+export const syncProductQueue = createQueue("sync-product", {
+  attempts: 3,
+  backoff: { type: "exponential", delay: 2000 },
+  removeOnComplete: { count: 1000 },
+  removeOnFail: { count: 5000 },
 });
 
-export const syncCollectionQueue = new Queue("sync-collection", {
-  connection: redis as any,
-  defaultJobOptions: {
-    attempts: 3,
-    backoff: { type: "exponential", delay: 2000 },
-    removeOnComplete: { count: 500 },
-    removeOnFail: { count: 2000 },
-  },
+export const syncCollectionQueue = createQueue("sync-collection", {
+  attempts: 3,
+  backoff: { type: "exponential", delay: 2000 },
+  removeOnComplete: { count: 500 },
+  removeOnFail: { count: 2000 },
 });
 
-export const syncInventoryQueue = new Queue("sync-inventory", {
-  connection: redis as any,
-  defaultJobOptions: {
-    attempts: 3,
-    backoff: { type: "exponential", delay: 1000 },
-    removeOnComplete: { count: 2000 },
-    removeOnFail: { count: 5000 },
-  },
+export const syncInventoryQueue = createQueue("sync-inventory", {
+  attempts: 3,
+  backoff: { type: "exponential", delay: 1000 },
+  removeOnComplete: { count: 2000 },
+  removeOnFail: { count: 5000 },
 });
 
-export const bulkSyncQueue = new Queue("bulk-sync", {
-  connection: redis as any,
-  defaultJobOptions: {
-    attempts: 2,
-    backoff: { type: "exponential", delay: 5000 },
-    removeOnComplete: { count: 100 },
-    removeOnFail: { count: 500 },
-  },
+export const bulkSyncQueue = createQueue("bulk-sync", {
+  attempts: 2,
+  backoff: { type: "exponential", delay: 5000 },
+  removeOnComplete: { count: 100 },
+  removeOnFail: { count: 500 },
 });
 
-export const scheduledSyncQueue = new Queue("scheduled-sync", {
-  connection: redis as any,
-  defaultJobOptions: {
-    attempts: 2,
-    removeOnComplete: { count: 200 },
-    removeOnFail: { count: 500 },
-  },
+export const scheduledSyncQueue = createQueue("scheduled-sync", {
+  attempts: 2,
+  removeOnComplete: { count: 200 },
+  removeOnFail: { count: 500 },
 });
 
 // ===== JOB DATA TYPES =====
@@ -109,8 +111,11 @@ export async function setupScheduledSync(
   syncRuleId: string,
   interval: string
 ): Promise<void> {
+  if (!scheduledSyncQueue) {
+    console.warn("[Queue] Redis unavailable, scheduled sync not configured");
+    return;
+  }
   try {
-    // Remove existing repeatable job
     const repeatableJobs = await scheduledSyncQueue.getRepeatableJobs();
     for (const job of repeatableJobs) {
       if (job.name === `scheduled-${syncRuleId}`) {
@@ -118,7 +123,6 @@ export async function setupScheduledSync(
       }
     }
 
-    // Add new repeatable job
     await scheduledSyncQueue.add(
       `scheduled-${syncRuleId}`,
       { syncRuleId } as ScheduledSyncJobData,
@@ -135,6 +139,10 @@ export async function setupScheduledSync(
  * Remove scheduled sync for a sync rule
  */
 export async function removeScheduledSync(syncRuleId: string): Promise<void> {
+  if (!scheduledSyncQueue) {
+    console.warn("[Queue] Redis unavailable, could not remove scheduled sync");
+    return;
+  }
   try {
     const repeatableJobs = await scheduledSyncQueue.getRepeatableJobs();
     for (const job of repeatableJobs) {
