@@ -119,6 +119,72 @@ export async function syncProduct(
       const errors = destResult.data.productSet.userErrors;
       console.log(`[ProductSync] productSet userErrors:`, JSON.stringify(errors));
 
+      // Handle PRODUCT_DOES_NOT_EXIST: stale mapping, clear it and retry as create
+      const notExistError = errors.find((e: any) => e.code === "PRODUCT_DOES_NOT_EXIST");
+      if (notExistError && existingMapping?.destProductGid) {
+        console.log(`[ProductSync] Dest product was deleted, clearing stale mapping and retrying as create`);
+        await prisma.productMapping.delete({
+          where: {
+            sourceStoreId_destStoreId_sourceProductGid: {
+              sourceStoreId: syncRule.sourceStoreId,
+              destStoreId: syncRule.destStoreId,
+              sourceProductGid,
+            },
+          },
+        });
+        // Rebuild input without destination product ID (creates new product)
+        const createInput = await buildProductSetInput(
+          sourceProduct,
+          syncRule,
+          undefined,
+          undefined
+        );
+        const createResult = await destClient.queryWithRetry(PRODUCT_SET_MUTATION, {
+          input: createInput,
+          synchronous: true,
+        });
+
+        if (createResult.data?.productSet?.userErrors?.length) {
+          console.log(`[ProductSync] Retry create userErrors:`, JSON.stringify(createResult.data.productSet.userErrors));
+          return {
+            success: false,
+            action: "CREATE",
+            sourceGid: sourceProductGid,
+            error: createResult.data.productSet.userErrors.map((e: any) => e.message).join("; "),
+            duration: Date.now() - startTime,
+          };
+        }
+
+        const createdProduct = createResult.data?.productSet?.product;
+        if (createdProduct) {
+          const variantMappings = buildVariantMappings(
+            sourceProduct.variants.edges,
+            createdProduct.variants.edges
+          );
+          await prisma.productMapping.create({
+            data: {
+              sourceStoreId: syncRule.sourceStoreId,
+              destStoreId: syncRule.destStoreId,
+              sourceProductGid,
+              destProductGid: createdProduct.id,
+              sourceHandle: sourceProduct.handle,
+              variantMappings: JSON.stringify(variantMappings),
+              syncHash: currentHash,
+              status: "SYNCED",
+              lastSyncedAt: new Date(),
+            },
+          });
+          if (isNewProduct) await incrementProductCount(syncRule.sourceStore.shopDomain);
+          return {
+            success: true,
+            action: "CREATE",
+            sourceGid: sourceProductGid,
+            destGid: createdProduct.id,
+            duration: Date.now() - startTime,
+          };
+        }
+      }
+
       // Handle HANDLE_NOT_UNIQUE: look up existing product on destination and retry as update
       const handleError = errors.find((e: any) => e.code === "HANDLE_NOT_UNIQUE");
       if (handleError && isNewProduct) {
