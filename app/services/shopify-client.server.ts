@@ -222,8 +222,12 @@ export async function createClientForStore(
   });
 
   if (offlineSession?.accessToken) {
-    console.log(`[ClientFactory] Using offline session token for ${store.shopDomain} (expires=${offlineSession.expires})`);
-    return new ShopifyGraphQLClient(store.shopDomain, offlineSession.accessToken);
+    const isExpired = offlineSession.expires && new Date(offlineSession.expires) < new Date();
+    if (!isExpired) {
+      console.log(`[ClientFactory] Using offline session token for ${store.shopDomain} (expires=${offlineSession.expires})`);
+      return new ShopifyGraphQLClient(store.shopDomain, offlineSession.accessToken);
+    }
+    console.log(`[ClientFactory] Offline session token EXPIRED for ${store.shopDomain} (expired=${offlineSession.expires}). Open the app from this store's Shopify admin to refresh.`);
   }
 
   // Fallback: find ANY session for this shop (online sessions from token exchange)
