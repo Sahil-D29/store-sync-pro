@@ -50,6 +50,8 @@ export const action = async ({ request }: ActionFunctionArgs) => {
       const type = formData.get("type") as string;
       const value = parseFloat(formData.get("value") as string);
       const targetCurrency = formData.get("targetCurrency") as string;
+      const manualExchangeRateStr = formData.get("manualExchangeRate") as string;
+      const manualExchangeRate = manualExchangeRateStr ? parseFloat(manualExchangeRateStr) : null;
       const roundTo = formData.get("roundTo")
         ? parseFloat(formData.get("roundTo") as string)
         : 0.99;
@@ -65,6 +67,7 @@ export const action = async ({ request }: ActionFunctionArgs) => {
           type: type as any,
           value,
           targetCurrency: targetCurrency || "USD",
+          manualExchangeRate: manualExchangeRate && !isNaN(manualExchangeRate) ? manualExchangeRate : null,
           roundTo,
           applyToCompareAt,
         },
@@ -96,6 +99,7 @@ export default function PriceRulesPage() {
     type: "PERCENTAGE_MARKUP",
     value: "",
     targetCurrency: "USD",
+    manualExchangeRate: "",
     roundTo: "0.99",
     applyToCompareAt: false,
   });
@@ -113,6 +117,7 @@ export default function PriceRulesPage() {
       type: "PERCENTAGE_MARKUP",
       value: "",
       targetCurrency: "USD",
+      manualExchangeRate: "",
       roundTo: "0.99",
       applyToCompareAt: false,
     });
@@ -142,7 +147,7 @@ export default function PriceRulesPage() {
       case "FIXED_DISCOUNT":
         return `$${rule.value.toFixed(2)}`;
       case "CURRENCY_CONVERSION":
-        return `Convert to ${rule.targetCurrency} (+${rule.value}% markup)`;
+        return `Convert to ${rule.targetCurrency}${rule.manualExchangeRate ? ` @ ${rule.manualExchangeRate}` : " (auto rate)"}${rule.value ? ` +${rule.value}% markup` : ""}`;
       default:
         return String(rule.value);
     }
@@ -152,6 +157,7 @@ export default function PriceRulesPage() {
   const getPreview = () => {
     const samplePrice = 100;
     const value = parseFloat(formData.value) || 0;
+    const manualRate = parseFloat(formData.manualExchangeRate) || 0;
     let result = samplePrice;
 
     switch (formData.type) {
@@ -168,10 +174,20 @@ export default function PriceRulesPage() {
         result = Math.max(0, samplePrice - value);
         break;
       case "CURRENCY_CONVERSION":
-        result = samplePrice * (1 + value / 100);
+        if (manualRate > 0) {
+          result = samplePrice * manualRate * (1 + value / 100);
+        } else {
+          result = samplePrice * (1 + value / 100);
+        }
         break;
     }
 
+    const fromCurrency = formData.type === "CURRENCY_CONVERSION" ? "source" : "$";
+    const toCurrency = formData.type === "CURRENCY_CONVERSION" ? formData.targetCurrency : "$";
+
+    if (formData.type === "CURRENCY_CONVERSION" && manualRate > 0) {
+      return `$${samplePrice.toFixed(2)} x ${manualRate} = ${toCurrency} ${result.toFixed(2)}`;
+    }
     return `$${samplePrice.toFixed(2)} -> $${result.toFixed(2)}`;
   };
 
@@ -297,13 +313,24 @@ export default function PriceRulesPage() {
             />
 
             {formData.type === "CURRENCY_CONVERSION" && (
-              <TextField
-                label="Target currency"
-                value={formData.targetCurrency}
-                onChange={(v) => setFormData({ ...formData, targetCurrency: v })}
-                placeholder="USD"
-                autoComplete="off"
-              />
+              <>
+                <TextField
+                  label="Target currency"
+                  value={formData.targetCurrency}
+                  onChange={(v) => setFormData({ ...formData, targetCurrency: v })}
+                  placeholder="INR"
+                  autoComplete="off"
+                />
+                <TextField
+                  label="Manual exchange rate (optional)"
+                  value={formData.manualExchangeRate}
+                  onChange={(v) => setFormData({ ...formData, manualExchangeRate: v })}
+                  type="number"
+                  placeholder="e.g., 94 for 1 USD = 94 INR"
+                  helpText="Set a fixed rate manually. Leave empty to use live exchange rates from API."
+                  autoComplete="off"
+                />
+              </>
             )}
 
             <Select

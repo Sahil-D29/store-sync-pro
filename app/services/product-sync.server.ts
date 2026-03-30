@@ -59,8 +59,8 @@ export async function syncProduct(
 
     const sourceProduct = sourceResult.data.product;
 
-    // Check change detection via hash
-    const currentHash = computeProductHash(sourceProduct);
+    // Check change detection via hash (includes price rule config so rule changes trigger re-sync)
+    const currentHash = computeProductHash(sourceProduct, syncRule.priceRule);
     const existingMapping = await prisma.productMapping.findUnique({
       where: {
         sourceStoreId_destStoreId_sourceProductGid: {
@@ -482,10 +482,18 @@ async function buildProductSetInput(
       syncRule.priceRule?.type === "CURRENCY_CONVERSION" &&
       syncRule.sourceStore.currencyCode !== syncRule.priceRule.targetCurrency
     ) {
-      exchangeRate = await getExchangeRate(
-        syncRule.sourceStore.currencyCode,
-        syncRule.priceRule.targetCurrency
-      );
+      // Use manual rate if set, otherwise fetch from API
+      const manualRate = (syncRule.priceRule as any).manualExchangeRate;
+      if (manualRate) {
+        exchangeRate = manualRate;
+        console.log(`[ProductSync] Using manual exchange rate: ${manualRate}`);
+      } else {
+        exchangeRate = await getExchangeRate(
+          syncRule.sourceStore.currencyCode,
+          syncRule.priceRule.targetCurrency
+        );
+        console.log(`[ProductSync] Using API exchange rate: ${exchangeRate}`);
+      }
     }
 
     input.variants = sourceProduct.variants.edges.map(
@@ -520,6 +528,7 @@ async function buildProductSetInput(
             syncRule.sourceStore.currencyCode,
             exchangeRate
           );
+          console.log(`[ProductSync] Price transform: ${variant.price} -> ${transformed.price} (rule: ${syncRule.priceRule.type}, value: ${syncRule.priceRule.value}, rate: ${exchangeRate || 'N/A'})`);
           variantInput.price = parseFloat(transformed.price);
           if (transformed.compareAtPrice) {
             variantInput.compareAtPrice = parseFloat(
@@ -576,9 +585,10 @@ function buildVariantMappings(
 }
 
 /**
- * Compute a hash of product data for change detection
+ * Compute a hash of product data for change detection.
+ * Includes price rule config so that adding/changing a price rule triggers re-sync.
  */
-function computeProductHash(product: any): string {
+function computeProductHash(product: any, priceRule?: PriceRule | null): string {
   const relevantData = {
     title: product.title,
     descriptionHtml: product.descriptionHtml,
@@ -598,6 +608,18 @@ function computeProductHash(product: any): string {
       key: e.node.key,
       value: e.node.value,
     })),
+    // Include price rule config so rule changes invalidate the hash
+    priceRule: priceRule
+      ? {
+          id: priceRule.id,
+          type: priceRule.type,
+          value: priceRule.value,
+          targetCurrency: priceRule.targetCurrency,
+          manualExchangeRate: (priceRule as any).manualExchangeRate ?? null,
+          roundTo: priceRule.roundTo,
+          applyToCompareAt: priceRule.applyToCompareAt,
+        }
+      : null,
   };
 
   return createHash("md5")

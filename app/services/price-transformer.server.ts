@@ -50,16 +50,19 @@ export function transformPrice(
       }
       break;
 
-    case "CURRENCY_CONVERSION":
-      if (exchangeRate) {
+    case "CURRENCY_CONVERSION": {
+      // Use manual rate if set, otherwise use the API-fetched rate
+      const rate = (priceRule as any).manualExchangeRate || exchangeRate;
+      if (rate) {
         // value is additional markup percentage on top of conversion
-        price = price * exchangeRate * (1 + priceRule.value / 100);
+        price = price * rate * (1 + priceRule.value / 100);
         if (priceRule.applyToCompareAt && compareAtPrice) {
           compareAtPrice =
-            compareAtPrice * exchangeRate * (1 + priceRule.value / 100);
+            compareAtPrice * rate * (1 + priceRule.value / 100);
         }
       }
       break;
+    }
   }
 
   // Apply rounding

@@ -148,15 +148,16 @@ enum ScheduleInterval {
 // ===== PRICE RULES =====
 
 model PriceRule {
-  id             String        @id @default(cuid())
-  name           String
-  type           PriceRuleType
-  value          Float // percentage or fixed amount
-  targetCurrency String        @default("USD")
-  roundTo        Float?        @default(0.99) // rounding (.99, .95, .00)
-  applyToCompareAt Boolean     @default(false)
-  createdAt      DateTime      @default(now())
-  updatedAt      DateTime      @updatedAt
+  id                 String        @id @default(cuid())
+  name               String
+  type               PriceRuleType
+  value              Float // percentage or fixed amount
+  targetCurrency     String        @default("USD")
+  manualExchangeRate Float? // manual currency rate (e.g., 94.0 for 1 USD = 94 INR). When set, overrides API rate.
+  roundTo            Float?        @default(0.99) // rounding (.99, .95, .00)
+  applyToCompareAt   Boolean       @default(false)
+  createdAt          DateTime      @default(now())
+  updatedAt          DateTime      @updatedAt
 
   syncRules SyncRule[]
 }
