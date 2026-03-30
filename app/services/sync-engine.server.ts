@@ -324,14 +324,34 @@ async function syncProductExtras(
   return errors;
 }
 
+// Concurrency: how many products to sync in parallel.
+// Shopify rate limit = 1000 points, restore 50/sec. Each product uses ~10-20 points.
+// 3 concurrent keeps us safely under the limit.
+const SYNC_CONCURRENCY = 3;
+
 /**
- * Trigger a manual sync for a specific sync rule
+ * Process an array of items in batches with concurrency limit.
+ */
+async function processBatch<T>(
+  items: T[],
+  concurrency: number,
+  handler: (item: T) => Promise<void>
+): Promise<void> {
+  for (let i = 0; i < items.length; i += concurrency) {
+    const batch = items.slice(i, i + concurrency);
+    await Promise.all(batch.map(handler));
+  }
+}
+
+/**
+ * Trigger a manual sync for a specific sync rule.
+ * Returns immediately with a jobId — the sync runs in the background.
  */
 export async function triggerManualSync(
   syncRuleId: string,
   productGids?: string[],
   currentSession?: { shop: string; accessToken: string }
-): Promise<{ queued: number; errors: string[] }> {
+): Promise<{ jobId: string; queued: number; errors: string[] }> {
   const rule = await prisma.syncRule.findUnique({
     where: { id: syncRuleId },
     include: { sourceStore: true, destStore: true, priceRule: true },
@@ -360,77 +380,149 @@ export async function triggerManualSync(
     destClient = await createClientForStore(rule.destStoreId);
   }
 
-  const errors: string[] = [];
-  let queued = 0;
-
-  // Helper to sync a single product + extras (force=true to skip hash check on manual sync)
-  const syncOneProduct = async (gid: string) => {
-    const result = await syncProduct(
-      rule as SyncRuleWithRelations,
-      gid,
-      sourceClient,
-      destClient,
-      true // forceSync - manual sync always forces re-sync
-    );
-
-    // Sync extras after successful product sync
-    if (result.success && result.destGid) {
-      const extraErrors = await syncProductExtras(
-        rule as SyncRuleWithRelations,
-        gid,
-        result.destGid,
-        sourceClient,
-        destClient
-      );
-      if (extraErrors.length > 0) {
-        console.warn(`[SyncEngine] Extras warnings for ${gid}:`, extraErrors);
-      }
-    }
-
-    await prisma.syncLog.create({
-      data: {
-        syncRuleId: rule.id,
-        storeId: rule.destStoreId,
-        action: result.action,
-        resourceType: "PRODUCT",
-        sourceGid: result.sourceGid,
-        destGid: result.destGid,
-        status: result.success ? "SUCCESS" : "FAILED",
-        trigger: "MANUAL",
-        errorDetail: result.error,
-        duration: result.duration,
-      },
-    });
-
-    if (result.success) queued++;
-    else if (result.error) errors.push(result.error);
-  };
-
+  // Resolve product list before going async
+  let allProductGids: string[];
   if (productGids?.length) {
-    console.log(`[SyncEngine] Syncing ${productGids.length} specific products`);
-    for (const gid of productGids) {
-      await syncOneProduct(gid);
-    }
+    allProductGids = productGids;
   } else {
-    const products = await fetchFilteredProducts(rule, sourceClient);
-    console.log(`[SyncEngine] fetchFilteredProducts returned ${products.length} products`);
-    for (const productGid of products) {
-      await syncOneProduct(productGid);
-    }
+    allProductGids = await fetchFilteredProducts(rule, sourceClient);
   }
 
-  // Update lastRunAt
-  await prisma.syncRule.update({
-    where: { id: syncRuleId },
-    data: { lastRunAt: new Date() },
+  console.log(`[SyncEngine] Total products to sync: ${allProductGids.length}`);
+
+  // Create a SyncJob to track progress
+  const job = await prisma.syncJob.create({
+    data: {
+      syncRuleId: rule.id,
+      totalProducts: allProductGids.length,
+      trigger: "MANUAL",
+    },
   });
 
-  await prisma.connectedStore.update({
-    where: { id: rule.sourceStoreId },
-    data: { lastSyncAt: new Date() },
-  });
+  // If no products, mark job complete immediately
+  if (allProductGids.length === 0) {
+    await prisma.syncJob.update({
+      where: { id: job.id },
+      data: { status: "COMPLETED", completedAt: new Date() },
+    });
+    return { jobId: job.id, queued: 0, errors: [] };
+  }
 
-  return { queued, errors };
+  // Run the sync in the background so the HTTP request returns immediately
+  const syncErrors: string[] = [];
+  let synced = 0;
+  let failed = 0;
+  let skipped = 0;
+
+  const runBackground = async () => {
+    try {
+      await processBatch(allProductGids, SYNC_CONCURRENCY, async (gid) => {
+        const result = await syncProduct(
+          rule as SyncRuleWithRelations,
+          gid,
+          sourceClient,
+          destClient,
+          true // forceSync - manual sync always forces re-sync
+        );
+
+        // Sync extras after successful product sync
+        if (result.success && result.destGid) {
+          const extraErrors = await syncProductExtras(
+            rule as SyncRuleWithRelations,
+            gid,
+            result.destGid,
+            sourceClient,
+            destClient
+          );
+          if (extraErrors.length > 0) {
+            console.warn(`[SyncEngine] Extras warnings for ${gid}:`, extraErrors);
+          }
+        }
+
+        await prisma.syncLog.create({
+          data: {
+            syncRuleId: rule.id,
+            storeId: rule.destStoreId,
+            action: result.action,
+            resourceType: "PRODUCT",
+            sourceGid: result.sourceGid,
+            destGid: result.destGid,
+            status: result.success ? "SUCCESS" : "FAILED",
+            trigger: "MANUAL",
+            errorDetail: result.error,
+            duration: result.duration,
+          },
+        });
+
+        if (result.success) {
+          if (result.action === "SKIP") skipped++;
+          else synced++;
+        } else {
+          failed++;
+          if (result.error) syncErrors.push(result.error);
+        }
+
+        // Update job progress periodically (every product for small sets, or we could batch this)
+        await prisma.syncJob.update({
+          where: { id: job.id },
+          data: {
+            syncedProducts: synced,
+            failedProducts: failed,
+            skippedProducts: skipped,
+          },
+        });
+      });
+
+      // Mark job complete
+      const finalStatus = failed > 0 ? "COMPLETED_WITH_ERRORS" : "COMPLETED";
+      await prisma.syncJob.update({
+        where: { id: job.id },
+        data: {
+          status: finalStatus,
+          syncedProducts: synced,
+          failedProducts: failed,
+          skippedProducts: skipped,
+          errors: syncErrors.length > 0 ? JSON.stringify(syncErrors.slice(0, 50)) : null,
+          completedAt: new Date(),
+        },
+      });
+
+      console.log(`[SyncEngine] Job ${job.id} completed: ${synced} synced, ${failed} failed, ${skipped} skipped`);
+    } catch (error) {
+      console.error(`[SyncEngine] Job ${job.id} FAILED:`, error);
+      await prisma.syncJob.update({
+        where: { id: job.id },
+        data: {
+          status: "FAILED",
+          errors: JSON.stringify([...(syncErrors.slice(0, 49)), (error as Error).message]),
+          completedAt: new Date(),
+        },
+      });
+    }
+
+    // Update lastRunAt
+    await prisma.syncRule.update({
+      where: { id: syncRuleId },
+      data: { lastRunAt: new Date() },
+    });
+
+    await prisma.connectedStore.update({
+      where: { id: rule.sourceStoreId },
+      data: { lastSyncAt: new Date() },
+    });
+  };
+
+  // Fire and forget — the job runs in the background
+  runBackground().catch((err) => console.error(`[SyncEngine] Background sync fatal:`, err));
+
+  return { jobId: job.id, queued: allProductGids.length, errors: [] };
+}
+
+/**
+ * Get the current status of a sync job
+ */
+export async function getSyncJobStatus(jobId: string) {
+  return prisma.syncJob.findUnique({ where: { id: jobId } });
 }
 
 /**

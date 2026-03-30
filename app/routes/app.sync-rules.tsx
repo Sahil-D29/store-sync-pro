@@ -1,4 +1,4 @@
-import { useState, useCallback } from "react";
+import { useState, useCallback, useEffect, useRef } from "react";
 import type { ActionFunctionArgs, LoaderFunctionArgs } from "@remix-run/node";
 import { json } from "@remix-run/node";
 import { useLoaderData, useSubmit, useNavigation, useFetcher, useRouteError, isRouteErrorResponse } from "@remix-run/react";
@@ -19,6 +19,7 @@ import {
   IndexTable,
   Banner,
   Tag,
+  ProgressBar,
 } from "@shopify/polaris";
 import { TitleBar } from "@shopify/app-bridge-react";
 import { authenticate } from "../shopify.server";
@@ -332,9 +333,76 @@ export default function SyncRulesPage() {
     submit({ intent: "delete", ruleId }, { method: "POST" });
   };
 
+  // --- Sync job progress tracking ---
+  const [syncJobs, setSyncJobs] = useState<Record<string, { jobId: string; total: number; synced: number; failed: number; status: string }>>({});
+  const pollTimers = useRef<Record<string, ReturnType<typeof setInterval>>>({});
+
+  const pollJobStatus = useCallback((ruleId: string, jobId: string) => {
+    // Clear any existing poll for this rule
+    if (pollTimers.current[ruleId]) clearInterval(pollTimers.current[ruleId]);
+
+    const timer = setInterval(async () => {
+      try {
+        const res = await fetch(`/api/sync-job/${jobId}`);
+        if (!res.ok) return;
+        const data = await res.json();
+        setSyncJobs((prev) => ({
+          ...prev,
+          [ruleId]: {
+            jobId,
+            total: data.totalProducts,
+            synced: data.syncedProducts,
+            failed: data.failedProducts,
+            status: data.status,
+          },
+        }));
+        if (data.status !== "RUNNING") {
+          clearInterval(pollTimers.current[ruleId]);
+          delete pollTimers.current[ruleId];
+          // Clear progress after 8 seconds so it doesn't stay forever
+          setTimeout(() => {
+            setSyncJobs((prev) => {
+              const next = { ...prev };
+              delete next[ruleId];
+              return next;
+            });
+          }, 8000);
+        }
+      } catch {
+        // Ignore fetch errors during polling
+      }
+    }, 2000);
+
+    pollTimers.current[ruleId] = timer;
+  }, []);
+
+  // Cleanup poll timers on unmount
+  useEffect(() => {
+    return () => {
+      Object.values(pollTimers.current).forEach(clearInterval);
+    };
+  }, []);
+
   const handleSyncNow = (ruleId: string) => {
     fetcher.submit({ intent: "sync-now", ruleId }, { method: "POST" });
   };
+
+  // When fetcher returns a jobId, start polling
+  useEffect(() => {
+    const data = fetcher.data as any;
+    if (data?.jobId && data?.success) {
+      // Find which rule was synced — look at the fetcher formData
+      const formData = fetcher.formData;
+      const ruleId = formData?.get("ruleId") as string;
+      if (ruleId) {
+        setSyncJobs((prev) => ({
+          ...prev,
+          [ruleId]: { jobId: data.jobId, total: data.queued || 0, synced: 0, failed: 0, status: "RUNNING" },
+        }));
+        pollJobStatus(ruleId, data.jobId);
+      }
+    }
+  }, [fetcher.data, fetcher.formData, pollJobStatus]);
 
   const openProductPicker = useCallback(async () => {
     try {
@@ -526,9 +594,12 @@ export default function SyncRulesPage() {
                       <Button
                         size="slim"
                         onClick={() => handleSyncNow(rule.id)}
-                        loading={isSubmitting}
+                        loading={isSubmitting || syncJobs[rule.id]?.status === "RUNNING"}
+                        disabled={syncJobs[rule.id]?.status === "RUNNING"}
                       >
-                        Sync Now
+                        {syncJobs[rule.id]?.status === "RUNNING"
+                          ? `Syncing ${syncJobs[rule.id].synced}/${syncJobs[rule.id].total}`
+                          : "Sync Now"}
                       </Button>
                       <Button
                         size="slim"
@@ -544,6 +615,24 @@ export default function SyncRulesPage() {
                         Delete
                       </Button>
                     </InlineStack>
+                    {syncJobs[rule.id] && (
+                      <Box paddingBlockStart="200">
+                        <BlockStack gap="100">
+                          <ProgressBar
+                            progress={syncJobs[rule.id].total > 0 ? Math.round(((syncJobs[rule.id].synced + syncJobs[rule.id].failed) / syncJobs[rule.id].total) * 100) : 0}
+                            size="small"
+                            tone={syncJobs[rule.id].status === "COMPLETED" ? "success" : syncJobs[rule.id].status === "FAILED" ? "critical" : "highlight"}
+                          />
+                          <Text as="span" variant="bodySm" tone={syncJobs[rule.id].failed > 0 ? "critical" : "subdued"}>
+                            {syncJobs[rule.id].status === "RUNNING"
+                              ? `Syncing... ${syncJobs[rule.id].synced + syncJobs[rule.id].failed}/${syncJobs[rule.id].total} products`
+                              : syncJobs[rule.id].status === "COMPLETED"
+                              ? `Done! ${syncJobs[rule.id].synced} synced`
+                              : `Completed with ${syncJobs[rule.id].failed} errors, ${syncJobs[rule.id].synced} synced`}
+                          </Text>
+                        </BlockStack>
+                      </Box>
+                    )}
                   </IndexTable.Cell>
                 </IndexTable.Row>
               ))}

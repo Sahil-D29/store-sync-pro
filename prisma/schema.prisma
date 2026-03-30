@@ -284,6 +284,31 @@ enum SyncTrigger {
   RETRY
 }
 
+// ===== SYNC JOBS (background sync progress tracking) =====
+
+model SyncJob {
+  id          String       @id @default(cuid())
+  syncRuleId  String
+  status      SyncJobStatus @default(RUNNING)
+  totalProducts  Int        @default(0)
+  syncedProducts Int        @default(0)
+  failedProducts Int        @default(0)
+  skippedProducts Int       @default(0)
+  errors      String?      // JSON array of error strings (capped)
+  trigger     SyncTrigger  @default(MANUAL)
+  startedAt   DateTime     @default(now())
+  completedAt DateTime?
+
+  @@index([syncRuleId, startedAt])
+}
+
+enum SyncJobStatus {
+  RUNNING
+  COMPLETED
+  COMPLETED_WITH_ERRORS
+  FAILED
+}
+
 // ===== EXCHANGE RATES =====
 
 model ExchangeRate {
