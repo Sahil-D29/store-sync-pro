@@ -13,7 +13,7 @@ redirect_urls = [
 ]
 
 [access_scopes]
-scopes = "write_products,read_products,write_inventory,read_inventory,read_product_listings,write_content,read_content,read_themes,write_themes"
+scopes = "write_products,read_products,write_inventory,read_inventory"
 
 [webhooks]
 api_version = "2025-01"

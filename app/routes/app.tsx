@@ -6,11 +6,17 @@ import { NavMenu } from "@shopify/app-bridge-react";
 import polarisStyles from "@shopify/polaris/build/esm/styles.css?url";
 
 import { authenticate } from "../shopify.server";
+import { withDbRetry } from "../utils/db-retry.server";
 
 export const links = () => [{ rel: "stylesheet", href: polarisStyles }];
 
 export const loader = async ({ request }: LoaderFunctionArgs) => {
-  await authenticate.admin(request);
+  // authenticate.admin reads the session from the Prisma-backed session store.
+  // On hosted Postgres a transient connection blip would otherwise bubble up as
+  // a bare "Application Error" for the WHOLE embedded app (this is the parent
+  // layout). withDbRetry retries only transient DB errors and immediately
+  // re-throws auth redirect Responses, so the OAuth/reauth flow is unaffected.
+  await withDbRetry(() => authenticate.admin(request));
   return { apiKey: process.env.SHOPIFY_API_KEY || "" };
 };
 
