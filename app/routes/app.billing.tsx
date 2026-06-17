@@ -146,6 +146,14 @@ export default function BillingPage() {
         )
       : 0;
 
+  // Break out of the embedded iframe to Shopify's managed pricing page.
+  // App Bridge intercepts window.open(..., "_top") and navigates the admin.
+  const goToManagedPricing = () => {
+    if (typeof window !== "undefined") {
+      window.open(managedPricingUrl, "_top");
+    }
+  };
+
   return (
     <Page>
       <TitleBar title="Billing & Plans" />
@@ -256,15 +264,14 @@ export default function BillingPage() {
                   <Button
                     variant={isCurrent ? "secondary" : "primary"}
                     disabled={isCurrent}
-                    url={isCurrent ? undefined : managedPricingUrl}
-                    target="_top"
+                    onClick={goToManagedPricing}
                     fullWidth
                   >
                     {isCurrent
                       ? "Current Plan"
                       : plan.price === 0
                       ? "Downgrade"
-                      : "Upgrade"}
+                      : "Choose plan"}
                   </Button>
                 </BlockStack>
               </Card>
