@@ -51,14 +51,28 @@ export function transformPrice(
       break;
 
     case "CURRENCY_CONVERSION": {
-      // Use manual rate if set, otherwise use the API-fetched rate
-      const rate = (priceRule as any).manualExchangeRate || exchangeRate;
-      if (rate) {
-        // value is additional markup percentage on top of conversion
-        price = price * rate * (1 + priceRule.value / 100);
+      // `value` is an additional markup % applied on top of the conversion
+      // (e.g. value = 10 => x1.1, value = -10 => x0.9).
+      const markupFactor = 1 + priceRule.value / 100;
+      const manualRate = (priceRule as any).manualExchangeRate as
+        | number
+        | null
+        | undefined;
+
+      if (manualRate && manualRate > 0) {
+        // Manual rate is entered as "how many SOURCE-currency units equal 1
+        // unit of the target currency" (e.g. 100 means 100 INR = 1 USD), so we
+        // DIVIDE: 100 INR / 100 = 1 USD, then apply the markup.
+        price = (price / manualRate) * markupFactor;
         if (priceRule.applyToCompareAt && compareAtPrice) {
-          compareAtPrice =
-            compareAtPrice * rate * (1 + priceRule.value / 100);
+          compareAtPrice = (compareAtPrice / manualRate) * markupFactor;
+        }
+      } else if (exchangeRate) {
+        // The live API rate is a direct multiplier: 1 source unit = `rate`
+        // target units (e.g. 1 INR = 0.012 USD), so we MULTIPLY.
+        price = price * exchangeRate * markupFactor;
+        if (priceRule.applyToCompareAt && compareAtPrice) {
+          compareAtPrice = compareAtPrice * exchangeRate * markupFactor;
         }
       }
       break;

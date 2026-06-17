@@ -71,6 +71,36 @@ export const COLLECTION_ADD_PRODUCTS_MUTATION = `#graphql
   }
 `;
 
+export const COLLECTION_REMOVE_PRODUCTS_MUTATION = `#graphql
+  mutation CollectionRemoveProducts($id: ID!, $productIds: [ID!]!) {
+    collectionRemoveProducts(id: $id, productIds: $productIds) {
+      job {
+        id
+        done
+      }
+      userErrors {
+        field
+        message
+      }
+    }
+  }
+`;
+
+export const COLLECTION_REORDER_PRODUCTS_MUTATION = `#graphql
+  mutation CollectionReorderProducts($id: ID!, $moves: [MoveInput!]!) {
+    collectionReorderProducts(id: $id, moves: $moves) {
+      job {
+        id
+        done
+      }
+      userErrors {
+        field
+        message
+      }
+    }
+  }
+`;
+
 export const INVENTORY_SET_QUANTITIES_MUTATION = `#graphql
   mutation InventorySetQuantities($input: InventorySetQuantitiesInput!) {
     inventorySetQuantities(input: $input) {

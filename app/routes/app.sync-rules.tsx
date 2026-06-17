@@ -251,7 +251,12 @@ export const action = async ({ request }: ActionFunctionArgs) => {
 export default function SyncRulesPage() {
   const { syncRules, stores, priceRules } = useLoaderData<typeof loader>();
   const submit = useSubmit();
-  const fetcher = useFetcher();
+  const fetcher = useFetcher<{
+    error?: string;
+    success?: boolean;
+    queued?: number;
+    errors?: string[];
+  }>();
   const navigation = useNavigation();
   const isSubmitting = navigation.state === "submitting" || fetcher.state === "submitting";
 
@@ -517,7 +522,7 @@ export default function SyncRulesPage() {
         )}
         {fetcher.data?.success && fetcher.data?.queued !== undefined && (
           <Banner tone="success" title="Sync complete">
-            <p>Synced {fetcher.data.queued} products. {fetcher.data.errors?.length > 0 ? `${fetcher.data.errors.length} errors occurred.` : ""}</p>
+            <p>Synced {fetcher.data.queued} products. {(fetcher.data.errors?.length ?? 0) > 0 ? `${fetcher.data.errors!.length} errors occurred.` : ""}</p>
           </Banner>
         )}
         {syncRules.length === 0 ? (

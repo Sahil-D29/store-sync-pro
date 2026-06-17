@@ -157,6 +157,15 @@ export const GET_COLLECTION_PRODUCTS = `#graphql
   }
 `;
 
+export const GET_JOB_STATUS = `#graphql
+  query GetJobStatus($id: ID!) {
+    job(id: $id) {
+      id
+      done
+    }
+  }
+`;
+
 export const GET_PRODUCT_METAFIELDS = `#graphql
   query GetProductMetafields($id: ID!, $first: Int!, $after: String) {
     product(id: $id) {

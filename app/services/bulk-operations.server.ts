@@ -224,6 +224,10 @@ export async function processBulkResults(
 
     // Queue sync for each product
     const { syncProductQueue } = await import("../jobs/queue.server");
+    if (!syncProductQueue) {
+      result.errors.push("Queue unavailable (Redis not connected)");
+      return result;
+    }
 
     for (const [productGid] of products) {
       try {

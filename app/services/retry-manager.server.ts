@@ -75,6 +75,7 @@ export async function retrySyncItem(logId: string): Promise<{ success: boolean; 
     switch (logEntry.resourceType) {
       case "PRODUCT":
         if (!logEntry.sourceGid) return { success: false, error: "No source GID" };
+        if (!syncProductQueue) return { success: false, error: "Queue unavailable (Redis not connected)" };
         await syncProductQueue.add(`retry-${logEntry.id}`, {
           syncRuleId: logEntry.syncRuleId,
           sourceProductGid: logEntry.sourceGid,
@@ -84,6 +85,7 @@ export async function retrySyncItem(logId: string): Promise<{ success: boolean; 
 
       case "COLLECTION":
         if (!logEntry.sourceGid) return { success: false, error: "No source GID" };
+        if (!syncCollectionQueue) return { success: false, error: "Queue unavailable (Redis not connected)" };
         await syncCollectionQueue.add(`retry-${logEntry.id}`, {
           syncRuleId: logEntry.syncRuleId,
           sourceCollectionGid: logEntry.sourceGid,
@@ -93,6 +95,7 @@ export async function retrySyncItem(logId: string): Promise<{ success: boolean; 
 
       case "INVENTORY":
         if (!logEntry.sourceGid) return { success: false, error: "No source GID" };
+        if (!syncInventoryQueue) return { success: false, error: "Queue unavailable (Redis not connected)" };
         await syncInventoryQueue.add(`retry-${logEntry.id}`, {
           syncRuleId: logEntry.syncRuleId,
           inventoryItemId: logEntry.sourceGid,

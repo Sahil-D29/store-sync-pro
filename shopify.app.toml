@@ -1,6 +1,6 @@
 # This file stores configurations for your Shopify app.
 
-name = "Store Sync Pro"
+name = "Dorec Store Sync Live"
 client_id = "c9045bbb10f21af7d4d6ffa74a720e1d"
 application_url = "https://store-sync-pro-production-62d0.up.railway.app"
 embedded = true

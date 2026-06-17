@@ -175,18 +175,18 @@ export default function PriceRulesPage() {
         break;
       case "CURRENCY_CONVERSION":
         if (manualRate > 0) {
-          result = samplePrice * manualRate * (1 + value / 100);
+          // Manual rate = source units per 1 target unit, so divide.
+          result = (samplePrice / manualRate) * (1 + value / 100);
         } else {
           result = samplePrice * (1 + value / 100);
         }
         break;
     }
 
-    const fromCurrency = formData.type === "CURRENCY_CONVERSION" ? "source" : "$";
     const toCurrency = formData.type === "CURRENCY_CONVERSION" ? formData.targetCurrency : "$";
 
     if (formData.type === "CURRENCY_CONVERSION" && manualRate > 0) {
-      return `$${samplePrice.toFixed(2)} x ${manualRate} = ${toCurrency} ${result.toFixed(2)}`;
+      return `${samplePrice.toFixed(2)} (source) / ${manualRate} = ${toCurrency} ${result.toFixed(2)}`;
     }
     return `$${samplePrice.toFixed(2)} -> $${result.toFixed(2)}`;
   };
@@ -326,8 +326,8 @@ export default function PriceRulesPage() {
                   value={formData.manualExchangeRate}
                   onChange={(v) => setFormData({ ...formData, manualExchangeRate: v })}
                   type="number"
-                  placeholder="e.g., 94 for 1 USD = 94 INR"
-                  helpText="Set a fixed rate manually. Leave empty to use live exchange rates from API."
+                  placeholder="e.g., 100 for 100 INR = 1 USD"
+                  helpText="How many SOURCE-currency units equal 1 unit of the target currency. Example: enter 100 if 100 INR = 1 USD (a 100 INR product becomes 1 USD). Leave empty to use live API rates."
                   autoComplete="off"
                 />
               </>
