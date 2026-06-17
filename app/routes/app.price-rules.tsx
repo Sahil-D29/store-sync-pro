@@ -17,26 +17,41 @@ import {
   Checkbox,
   IndexTable,
   Divider,
+  Banner,
 } from "@shopify/polaris";
 import { TitleBar } from "@shopify/app-bridge-react";
+import { useRouteError } from "@remix-run/react";
 import { authenticate } from "../shopify.server";
 import prisma from "../db.server";
+import { withDbRetry } from "../utils/db-retry.server";
 
 export const loader = async ({ request }: LoaderFunctionArgs) => {
   await authenticate.admin(request);
 
-  const priceRules = await prisma.priceRule.findMany({
-    include: { _count: { select: { syncRules: true } } },
-    orderBy: { createdAt: "desc" },
-  });
+  try {
+    const priceRules = await withDbRetry(() =>
+      prisma.priceRule.findMany({
+        include: { _count: { select: { syncRules: true } } },
+        orderBy: { createdAt: "desc" },
+      })
+    );
 
-  return json({
-    priceRules: priceRules.map((r) => ({
-      ...r,
-      createdAt: r.createdAt.toISOString(),
-      updatedAt: r.updatedAt.toISOString(),
-    })),
-  });
+    return json({
+      priceRules: priceRules.map((r) => ({
+        ...r,
+        createdAt: r.createdAt.toISOString(),
+        updatedAt: r.updatedAt.toISOString(),
+      })),
+      loadError: null as string | null,
+    });
+  } catch (e) {
+    console.error("[PriceRules] Loader DB error:", (e as Error).message);
+    return json({
+      priceRules: [],
+      loadError:
+        "Couldn't load price rules right now (temporary connection issue). Please reload.",
+    });
+  }
 };
 
 export const action = async ({ request }: ActionFunctionArgs) => {
@@ -52,9 +67,9 @@ export const action = async ({ request }: ActionFunctionArgs) => {
       const targetCurrency = formData.get("targetCurrency") as string;
       const manualExchangeRateStr = formData.get("manualExchangeRate") as string;
       const manualExchangeRate = manualExchangeRateStr ? parseFloat(manualExchangeRateStr) : null;
-      const roundTo = formData.get("roundTo")
-        ? parseFloat(formData.get("roundTo") as string)
-        : 0.99;
+      const roundToStr = formData.get("roundTo") as string;
+      // "" means "No rounding" → store null. "0" is a valid value (round to whole).
+      const roundTo = roundToStr === "" || roundToStr == null ? null : parseFloat(roundToStr);
       const applyToCompareAt = formData.get("applyToCompareAt") === "true";
 
       if (!name || !type || isNaN(value)) {
@@ -62,6 +77,38 @@ export const action = async ({ request }: ActionFunctionArgs) => {
       }
 
       await prisma.priceRule.create({
+        data: {
+          name,
+          type: type as any,
+          value,
+          targetCurrency: targetCurrency || "USD",
+          manualExchangeRate: manualExchangeRate && !isNaN(manualExchangeRate) ? manualExchangeRate : null,
+          roundTo,
+          applyToCompareAt,
+        },
+      });
+
+      return json({ success: true });
+    }
+
+    case "update": {
+      const ruleId = formData.get("ruleId") as string;
+      const name = formData.get("name") as string;
+      const type = formData.get("type") as string;
+      const value = parseFloat(formData.get("value") as string);
+      const targetCurrency = formData.get("targetCurrency") as string;
+      const manualExchangeRateStr = formData.get("manualExchangeRate") as string;
+      const manualExchangeRate = manualExchangeRateStr ? parseFloat(manualExchangeRateStr) : null;
+      const roundToStr = formData.get("roundTo") as string;
+      const roundTo = roundToStr === "" ? null : parseFloat(roundToStr);
+      const applyToCompareAt = formData.get("applyToCompareAt") === "true";
+
+      if (!ruleId || !name || !type || isNaN(value)) {
+        return json({ error: "Name, type, and value are required" }, { status: 400 });
+      }
+
+      await prisma.priceRule.update({
+        where: { id: ruleId },
         data: {
           name,
           type: type as any,
@@ -87,40 +134,58 @@ export const action = async ({ request }: ActionFunctionArgs) => {
   }
 };
 
+const EMPTY_FORM = {
+  name: "",
+  type: "PERCENTAGE_MARKUP",
+  value: "",
+  targetCurrency: "USD",
+  manualExchangeRate: "",
+  roundTo: "0.99",
+  applyToCompareAt: false,
+};
+
 export default function PriceRulesPage() {
-  const { priceRules } = useLoaderData<typeof loader>();
+  const { priceRules, loadError } = useLoaderData<typeof loader>();
   const submit = useSubmit();
   const navigation = useNavigation();
   const isSubmitting = navigation.state === "submitting";
 
   const [showModal, setShowModal] = useState(false);
-  const [formData, setFormData] = useState({
-    name: "",
-    type: "PERCENTAGE_MARKUP",
-    value: "",
-    targetCurrency: "USD",
-    manualExchangeRate: "",
-    roundTo: "0.99",
-    applyToCompareAt: false,
-  });
+  const [editId, setEditId] = useState<string | null>(null);
+  const [formData, setFormData] = useState({ ...EMPTY_FORM });
 
-  const handleCreate = () => {
+  const openCreate = () => {
+    setEditId(null);
+    setFormData({ ...EMPTY_FORM });
+    setShowModal(true);
+  };
+
+  const openEdit = (rule: any) => {
+    setEditId(rule.id);
+    setFormData({
+      name: rule.name ?? "",
+      type: rule.type,
+      value: String(rule.value ?? ""),
+      targetCurrency: rule.targetCurrency ?? "USD",
+      manualExchangeRate:
+        rule.manualExchangeRate != null ? String(rule.manualExchangeRate) : "",
+      roundTo: rule.roundTo != null ? String(rule.roundTo) : "",
+      applyToCompareAt: !!rule.applyToCompareAt,
+    });
+    setShowModal(true);
+  };
+
+  const handleSave = () => {
     const data = new FormData();
-    data.set("intent", "create");
+    data.set("intent", editId ? "update" : "create");
+    if (editId) data.set("ruleId", editId);
     Object.entries(formData).forEach(([key, value]) => {
       data.set(key, String(value));
     });
     submit(data, { method: "POST" });
     setShowModal(false);
-    setFormData({
-      name: "",
-      type: "PERCENTAGE_MARKUP",
-      value: "",
-      targetCurrency: "USD",
-      manualExchangeRate: "",
-      roundTo: "0.99",
-      applyToCompareAt: false,
-    });
+    setEditId(null);
+    setFormData({ ...EMPTY_FORM });
   };
 
   const handleDelete = (ruleId: string) => {
@@ -194,12 +259,17 @@ export default function PriceRulesPage() {
   return (
     <Page>
       <TitleBar title="Price Rules">
-        <button variant="primary" onClick={() => setShowModal(true)}>
+        <button variant="primary" onClick={openCreate}>
           Create Price Rule
         </button>
       </TitleBar>
 
       <BlockStack gap="500">
+        {loadError && (
+          <Banner tone="warning" title="Temporary issue">
+            <p>{loadError}</p>
+          </Banner>
+        )}
         {priceRules.length === 0 ? (
           <Card>
             <BlockStack gap="300" inlineAlign="center">
@@ -207,7 +277,7 @@ export default function PriceRulesPage() {
                 No price rules yet. Create a price rule to transform prices
                 when syncing to destination stores.
               </Text>
-              <Button variant="primary" onClick={() => setShowModal(true)}>
+              <Button variant="primary" onClick={openCreate}>
                 Create Price Rule
               </Button>
             </BlockStack>
@@ -244,14 +314,19 @@ export default function PriceRulesPage() {
                     {rule._count.syncRules} sync rule(s)
                   </IndexTable.Cell>
                   <IndexTable.Cell>
-                    <Button
-                      size="slim"
-                      tone="critical"
-                      onClick={() => handleDelete(rule.id)}
-                      disabled={rule._count.syncRules > 0}
-                    >
-                      Delete
-                    </Button>
+                    <InlineStack gap="200">
+                      <Button size="slim" onClick={() => openEdit(rule)}>
+                        Edit
+                      </Button>
+                      <Button
+                        size="slim"
+                        tone="critical"
+                        onClick={() => handleDelete(rule.id)}
+                        disabled={rule._count.syncRules > 0}
+                      >
+                        Delete
+                      </Button>
+                    </InlineStack>
                   </IndexTable.Cell>
                 </IndexTable.Row>
               ))}
@@ -263,10 +338,10 @@ export default function PriceRulesPage() {
       <Modal
         open={showModal}
         onClose={() => setShowModal(false)}
-        title="Create Price Rule"
+        title={editId ? "Edit Price Rule" : "Create Price Rule"}
         primaryAction={{
-          content: "Create",
-          onAction: handleCreate,
+          content: editId ? "Save changes" : "Create",
+          onAction: handleSave,
           loading: isSubmitting,
           disabled: !formData.name || !formData.value,
         }}
@@ -360,6 +435,26 @@ export default function PriceRulesPage() {
           </BlockStack>
         </Modal.Section>
       </Modal>
+    </Page>
+  );
+}
+
+export function ErrorBoundary() {
+  const error = useRouteError();
+  return (
+    <Page>
+      <TitleBar title="Price Rules" />
+      <Card>
+        <BlockStack gap="300">
+          <Text as="h2" variant="headingMd">
+            Something went wrong
+          </Text>
+          <Text as="p" tone="subdued">
+            {error instanceof Error ? error.message : "Unexpected error loading price rules."}
+          </Text>
+          <Button url="/app/price-rules">Reload page</Button>
+        </BlockStack>
+      </Card>
     </Page>
   );
 }

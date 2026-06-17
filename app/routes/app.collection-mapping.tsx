@@ -19,27 +19,41 @@ import {
 import { TitleBar } from "@shopify/app-bridge-react";
 import { authenticate } from "../shopify.server";
 import prisma from "../db.server";
+import { withDbRetry } from "../utils/db-retry.server";
+import { useRouteError } from "@remix-run/react";
 
 export const loader = async ({ request }: LoaderFunctionArgs) => {
   await authenticate.admin(request);
 
-  const mappings = await prisma.collectionMapping.findMany({
-    include: {
-      sourceStore: { select: { shopDomain: true, shopName: true } },
-      destStore: { select: { shopDomain: true, shopName: true } },
-    },
-    orderBy: { lastSyncedAt: "desc" },
-    take: 100,
-  });
+  try {
+    const mappings = await withDbRetry(() =>
+      prisma.collectionMapping.findMany({
+        include: {
+          sourceStore: { select: { shopDomain: true, shopName: true } },
+          destStore: { select: { shopDomain: true, shopName: true } },
+        },
+        orderBy: { lastSyncedAt: "desc" },
+        take: 100,
+      })
+    );
 
-  return json({
-    mappings: mappings.map((m) => ({
-      ...m,
-      lastSyncedAt: m.lastSyncedAt?.toISOString(),
-      createdAt: m.createdAt.toISOString(),
-      updatedAt: m.updatedAt.toISOString(),
-    })),
-  });
+    return json({
+      mappings: mappings.map((m) => ({
+        ...m,
+        lastSyncedAt: m.lastSyncedAt?.toISOString(),
+        createdAt: m.createdAt.toISOString(),
+        updatedAt: m.updatedAt.toISOString(),
+      })),
+      loadError: null as string | null,
+    });
+  } catch (e) {
+    console.error("[CollectionMapping] Loader DB error:", (e as Error).message);
+    return json({
+      mappings: [],
+      loadError:
+        "Couldn't load collection mappings right now (temporary connection issue). Please reload.",
+    });
+  }
 };
 
 export const action = async ({ request }: ActionFunctionArgs) => {
@@ -70,7 +84,7 @@ export const action = async ({ request }: ActionFunctionArgs) => {
 };
 
 export default function CollectionMappingPage() {
-  const { mappings } = useLoaderData<typeof loader>();
+  const { mappings, loadError } = useLoaderData<typeof loader>();
   const submit = useSubmit();
   const navigation = useNavigation();
   const isSubmitting = navigation.state === "submitting";
@@ -95,6 +109,11 @@ export default function CollectionMappingPage() {
       <TitleBar title="Collection Mapping" />
 
       <BlockStack gap="500">
+        {loadError && (
+          <Banner tone="warning" title="Temporary issue">
+            <p>{loadError}</p>
+          </Banner>
+        )}
         <Banner tone="info">
           <p>
             Collection mappings are automatically created when collections are synced.
@@ -209,6 +228,26 @@ export default function CollectionMappingPage() {
           </Card>
         )}
       </BlockStack>
+    </Page>
+  );
+}
+
+export function ErrorBoundary() {
+  const error = useRouteError();
+  return (
+    <Page>
+      <TitleBar title="Collection Mapping" />
+      <Card>
+        <BlockStack gap="300">
+          <Text as="h2" variant="headingMd">
+            Something went wrong
+          </Text>
+          <Text as="p" tone="subdued">
+            {error instanceof Error ? error.message : "Unexpected error loading collection mappings."}
+          </Text>
+          <Button url="/app/collection-mapping">Reload page</Button>
+        </BlockStack>
+      </Card>
     </Page>
   );
 }

@@ -26,6 +26,7 @@ import { authenticate } from "../shopify.server";
 import prisma from "../db.server";
 import { triggerManualSync } from "../services/sync-engine.server";
 import { setupScheduledSync, removeScheduledSync } from "../jobs/queue.server";
+import { withDbRetry } from "../utils/db-retry.server";
 
 const DEFAULT_FORM = {
   name: "",
@@ -65,37 +66,51 @@ export const loader = async ({ request }: LoaderFunctionArgs) => {
     }
   }
 
-  const [syncRules, stores, priceRules] = await Promise.all([
-    prisma.syncRule.findMany({
-      include: {
-        sourceStore: { select: { shopDomain: true, shopName: true } },
-        destStore: { select: { shopDomain: true, shopName: true } },
-        priceRule: { select: { name: true } },
-        _count: { select: { syncLogs: true } },
-      },
-      orderBy: { createdAt: "desc" },
-    }),
-    prisma.connectedStore.findMany({
-      where: { status: "ACTIVE" },
-      select: { id: true, shopDomain: true, shopName: true, isBaseStore: true },
-      orderBy: { isBaseStore: "desc" },
-    }),
-    prisma.priceRule.findMany({
-      select: { id: true, name: true, type: true },
-      orderBy: { createdAt: "desc" },
-    }),
-  ]);
+  try {
+    const [syncRules, stores, priceRules] = await withDbRetry(() =>
+      Promise.all([
+        prisma.syncRule.findMany({
+          include: {
+            sourceStore: { select: { shopDomain: true, shopName: true } },
+            destStore: { select: { shopDomain: true, shopName: true } },
+            priceRule: { select: { name: true } },
+            _count: { select: { syncLogs: true } },
+          },
+          orderBy: { createdAt: "desc" },
+        }),
+        prisma.connectedStore.findMany({
+          where: { status: "ACTIVE" },
+          select: { id: true, shopDomain: true, shopName: true, isBaseStore: true },
+          orderBy: { isBaseStore: "desc" },
+        }),
+        prisma.priceRule.findMany({
+          select: { id: true, name: true, type: true },
+          orderBy: { createdAt: "desc" },
+        }),
+      ])
+    );
 
-  return json({
-    syncRules: syncRules.map((r) => ({
-      ...r,
-      lastRunAt: r.lastRunAt?.toISOString() || null,
-      createdAt: r.createdAt.toISOString(),
-      updatedAt: r.updatedAt.toISOString(),
-    })),
-    stores,
-    priceRules,
-  });
+    return json({
+      syncRules: syncRules.map((r) => ({
+        ...r,
+        lastRunAt: r.lastRunAt?.toISOString() || null,
+        createdAt: r.createdAt.toISOString(),
+        updatedAt: r.updatedAt.toISOString(),
+      })),
+      stores,
+      priceRules,
+      loadError: null as string | null,
+    });
+  } catch (e) {
+    console.error("[SyncRules] Loader DB error:", (e as Error).message);
+    return json({
+      syncRules: [],
+      stores: [],
+      priceRules: [],
+      loadError:
+        "Couldn't load sync rules right now (temporary connection issue). Please reload.",
+    });
+  }
 };
 
 export const action = async ({ request }: ActionFunctionArgs) => {
@@ -249,7 +264,7 @@ export const action = async ({ request }: ActionFunctionArgs) => {
 };
 
 export default function SyncRulesPage() {
-  const { syncRules, stores, priceRules } = useLoaderData<typeof loader>();
+  const { syncRules, stores, priceRules, loadError } = useLoaderData<typeof loader>();
   const submit = useSubmit();
   const fetcher = useFetcher<{
     error?: string;
@@ -515,6 +530,11 @@ export default function SyncRulesPage() {
       </TitleBar>
 
       <BlockStack gap="500">
+        {loadError && (
+          <Banner tone="warning" title="Temporary issue">
+            <p>{loadError}</p>
+          </Banner>
+        )}
         {fetcher.data?.error && (
           <Banner tone="critical" title="Error">
             <p>{fetcher.data.error}</p>

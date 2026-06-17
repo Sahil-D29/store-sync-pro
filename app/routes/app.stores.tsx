@@ -19,7 +19,9 @@ import {
   Divider,
 } from "@shopify/polaris";
 import { TitleBar } from "@shopify/app-bridge-react";
+import { useRouteError } from "@remix-run/react";
 import { authenticate } from "../shopify.server";
+import { withDbRetry } from "../utils/db-retry.server";
 import {
   getConnectedStores,
   connectStoreViaOAuth,
@@ -30,13 +32,25 @@ import {
 
 export const loader = async ({ request }: LoaderFunctionArgs) => {
   const { session } = await authenticate.admin(request);
-  const stores = await getConnectedStores();
 
-  return json({
-    stores,
-    currentShop: session.shop,
-    appClientId: process.env.SHOPIFY_API_KEY || "",
-  });
+  try {
+    const stores = await withDbRetry(() => getConnectedStores());
+    return json({
+      stores,
+      currentShop: session.shop,
+      appClientId: process.env.SHOPIFY_API_KEY || "",
+      loadError: null as string | null,
+    });
+  } catch (e) {
+    console.error("[Stores] Loader DB error:", (e as Error).message);
+    return json({
+      stores: [],
+      currentShop: session.shop,
+      appClientId: process.env.SHOPIFY_API_KEY || "",
+      loadError:
+        "Couldn't load connected stores right now (temporary connection issue). Please reload.",
+    });
+  }
 };
 
 export const action = async ({ request }: ActionFunctionArgs) => {
@@ -95,7 +109,7 @@ export const action = async ({ request }: ActionFunctionArgs) => {
 };
 
 export default function StoresPage() {
-  const { stores, currentShop, appClientId } = useLoaderData<typeof loader>();
+  const { stores, currentShop, appClientId, loadError } = useLoaderData<typeof loader>();
   const submit = useSubmit();
   const navigation = useNavigation();
   const isSubmitting = navigation.state === "submitting";
@@ -149,6 +163,11 @@ export default function StoresPage() {
       </TitleBar>
 
       <BlockStack gap="500">
+        {loadError && (
+          <Banner tone="warning" title="Temporary issue">
+            <p>{loadError}</p>
+          </Banner>
+        )}
         {/* Base Store Section */}
         <Card>
           <BlockStack gap="400">
@@ -362,6 +381,26 @@ export default function StoresPage() {
           </BlockStack>
         </Modal.Section>
       </Modal>
+    </Page>
+  );
+}
+
+export function ErrorBoundary() {
+  const error = useRouteError();
+  return (
+    <Page>
+      <TitleBar title="Connected Stores" />
+      <Card>
+        <BlockStack gap="300">
+          <Text as="h2" variant="headingMd">
+            Something went wrong
+          </Text>
+          <Text as="p" tone="subdued">
+            {error instanceof Error ? error.message : "Unexpected error loading stores."}
+          </Text>
+          <Button url="/app/stores">Reload page</Button>
+        </BlockStack>
+      </Card>
     </Page>
   );
 }

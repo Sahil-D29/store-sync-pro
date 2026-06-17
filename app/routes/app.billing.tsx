@@ -1,6 +1,6 @@
 import type { ActionFunctionArgs, LoaderFunctionArgs } from "@remix-run/node";
 import { json, redirect } from "@remix-run/node";
-import { useLoaderData, useSubmit, useNavigation } from "@remix-run/react";
+import { useLoaderData, useSubmit, useNavigation, useActionData, useRouteError } from "@remix-run/react";
 import {
   Page,
   Layout,
@@ -14,6 +14,7 @@ import {
   Box,
   Divider,
   ProgressBar,
+  Banner,
 } from "@shopify/polaris";
 import { TitleBar } from "@shopify/app-bridge-react";
 import { authenticate } from "../shopify.server";
@@ -23,37 +24,61 @@ import {
   BILLING_PLANS,
 } from "../services/billing.server";
 import prisma from "../db.server";
+import { withDbRetry } from "../utils/db-retry.server";
 
 export const loader = async ({ request }: LoaderFunctionArgs) => {
   const { session } = await authenticate.admin(request);
   const shopDomain = session.shop;
 
-  const [subscription, usage] = await Promise.all([
-    getSubscription(shopDomain),
-    prisma.usageTracker.findUnique({ where: { shopDomain } }),
-  ]);
+  const plans = Object.entries(BILLING_PLANS).map(([key, plan]) => ({
+    key,
+    name: plan.name,
+    price: plan.price,
+    productLimit: plan.productLimit === Infinity ? "Unlimited" : String(plan.productLimit),
+    trialDays: plan.trialDays,
+  }));
 
-  const planName = BILLING_PLANS[subscription.plan as keyof typeof BILLING_PLANS]?.name || subscription.plan;
+  try {
+    const [subscription, usage] = await withDbRetry(() =>
+      Promise.all([
+        getSubscription(shopDomain),
+        prisma.usageTracker.findUnique({ where: { shopDomain } }),
+      ])
+    );
 
-  return json({
-    subscription: {
-      plan: subscription.plan,
-      status: subscription.status,
-      productLimit: subscription.productLimit,
-      trialEndsAt: subscription.trialEndsAt?.toISOString() || null,
-      planName,
-    },
-    usage: {
-      syncedProductCount: usage?.syncedProductCount ?? 0,
-    },
-    plans: Object.entries(BILLING_PLANS).map(([key, plan]) => ({
-      key,
-      name: plan.name,
-      price: plan.price,
-      productLimit: plan.productLimit === Infinity ? "Unlimited" : String(plan.productLimit),
-      trialDays: plan.trialDays,
-    })),
-  });
+    const planName =
+      BILLING_PLANS[subscription.plan as keyof typeof BILLING_PLANS]?.name ||
+      subscription.plan;
+
+    return json({
+      subscription: {
+        plan: subscription.plan,
+        status: subscription.status,
+        productLimit: subscription.productLimit,
+        trialEndsAt: subscription.trialEndsAt?.toISOString() || null,
+        planName,
+      },
+      usage: { syncedProductCount: usage?.syncedProductCount ?? 0 },
+      plans,
+      loadError: null as string | null,
+    });
+  } catch (e) {
+    console.error("[Billing] Loader DB error:", (e as Error).message);
+    // Degrade gracefully to a default Free view so the page still renders.
+    return json({
+      subscription: {
+        plan: "FREE",
+        status: "ACTIVE",
+        productLimit: BILLING_PLANS.FREE.productLimit,
+        trialEndsAt: null,
+        planName: BILLING_PLANS.FREE.name,
+      },
+      usage: { syncedProductCount: 0 },
+      plans,
+      loadError:
+        "Couldn't load your current subscription right now (temporary connection issue). Plan changes may be unavailable until you reload.",
+    });
+  }
 };
 
 export const action = async ({ request }: ActionFunctionArgs) => {
@@ -68,27 +93,39 @@ export const action = async ({ request }: ActionFunctionArgs) => {
   const url = new URL(request.url);
   const returnUrl = `${url.origin}/app/billing`;
 
-  const result = await createBillingSubscription(
-    admin,
-    session.shop,
-    plan as any,
-    returnUrl,
-    process.env.NODE_ENV !== "production" // Use test mode in dev
-  );
+  try {
+    const result = await createBillingSubscription(
+      admin,
+      session.shop,
+      plan as any,
+      returnUrl,
+      process.env.NODE_ENV !== "production" // Use test mode in dev
+    );
 
-  if (result.error) {
-    return json({ error: result.error }, { status: 400 });
+    if (result.error) {
+      return json({ error: result.error }, { status: 400 });
+    }
+
+    if (result.confirmationUrl) {
+      return redirect(result.confirmationUrl);
+    }
+
+    return json({ success: true, message: "Plan updated" });
+  } catch (e) {
+    console.error("[Billing] Subscription action error:", (e as Error).message);
+    return json(
+      {
+        error:
+          "Couldn't start the plan change. Please try again in a moment. If this persists, reopen the app from your Shopify admin.",
+      },
+      { status: 500 }
+    );
   }
-
-  if (result.confirmationUrl) {
-    return redirect(result.confirmationUrl);
-  }
-
-  return json({ success: true, message: "Plan updated" });
 };
 
 export default function BillingPage() {
-  const { subscription, usage, plans } = useLoaderData<typeof loader>();
+  const { subscription, usage, plans, loadError } = useLoaderData<typeof loader>();
+  const actionData = useActionData<{ error?: string; success?: boolean; message?: string }>();
   const submit = useSubmit();
   const navigation = useNavigation();
   const isSubmitting = navigation.state === "submitting";
@@ -109,6 +146,16 @@ export default function BillingPage() {
     <Page>
       <TitleBar title="Billing & Plans" />
       <BlockStack gap="500">
+        {loadError && (
+          <Banner tone="warning" title="Temporary issue">
+            <p>{loadError}</p>
+          </Banner>
+        )}
+        {actionData?.error && (
+          <Banner tone="critical" title="Couldn't update plan">
+            <p>{actionData.error}</p>
+          </Banner>
+        )}
         {/* Current Plan */}
         <Card>
           <BlockStack gap="400">
@@ -215,6 +262,26 @@ export default function BillingPage() {
           })}
         </InlineGrid>
       </BlockStack>
+    </Page>
+  );
+}
+
+export function ErrorBoundary() {
+  const error = useRouteError();
+  return (
+    <Page>
+      <TitleBar title="Billing & Plans" />
+      <Card>
+        <BlockStack gap="300">
+          <Text as="h2" variant="headingMd">
+            Something went wrong
+          </Text>
+          <Text as="p" tone="subdued">
+            {error instanceof Error ? error.message : "Unexpected error loading billing."}
+          </Text>
+          <Button url="/app/billing">Reload page</Button>
+        </BlockStack>
+      </Card>
     </Page>
   );
 }

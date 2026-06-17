@@ -14,75 +14,99 @@ import {
   Banner,
 } from "@shopify/polaris";
 import { TitleBar } from "@shopify/app-bridge-react";
+import { useRouteError } from "@remix-run/react";
+import { Button } from "@shopify/polaris";
 import { authenticate } from "../shopify.server";
 import prisma from "../db.server";
 import { getSubscription } from "../services/billing.server";
+import { withDbRetry } from "../utils/db-retry.server";
+
+const EMPTY_STATS = {
+  connectedStores: 0,
+  activeSyncRules: 0,
+  successCount: 0,
+  errorCount: 0,
+  syncedProducts: 0,
+  productLimit: 100,
+  plan: "FREE",
+};
 
 export const loader = async ({ request }: LoaderFunctionArgs) => {
   const { session } = await authenticate.admin(request);
   const shopDomain = session.shop;
 
-  // Get stats
-  const [
-    connectedStores,
-    activeSyncRules,
-    recentLogs,
-    subscription,
-    usage,
-  ] = await Promise.all([
-    prisma.connectedStore.count({
-      where: { status: { not: "DISCONNECTED" } },
-    }),
-    prisma.syncRule.count({ where: { isActive: true } }),
-    prisma.syncLog.findMany({
-      orderBy: { createdAt: "desc" },
-      take: 10,
-      include: { syncRule: { select: { name: true } } },
-    }),
-    getSubscription(shopDomain),
-    prisma.usageTracker.findUnique({ where: { shopDomain } }),
-  ]);
-
-  const successCount = await prisma.syncLog.count({
-    where: {
-      status: "SUCCESS",
-      createdAt: { gte: new Date(Date.now() - 24 * 60 * 60 * 1000) },
-    },
-  });
-
-  const errorCount = await prisma.syncLog.count({
-    where: {
-      status: "FAILED",
-      createdAt: { gte: new Date(Date.now() - 24 * 60 * 60 * 1000) },
-    },
-  });
-
-  return {
-    stats: {
+  try {
+    const dayAgo = new Date(Date.now() - 24 * 60 * 60 * 1000);
+    const [
       connectedStores,
       activeSyncRules,
+      recentLogs,
+      subscription,
+      usage,
       successCount,
       errorCount,
-      syncedProducts: usage?.syncedProductCount ?? 0,
-      productLimit: subscription.productLimit,
-      plan: subscription.plan,
-    },
-    recentLogs: recentLogs.map((log) => ({
-      id: log.id,
-      action: log.action,
-      resourceType: log.resourceType,
-      status: log.status,
-      trigger: log.trigger,
-      message: log.message,
-      errorDetail: log.errorDetail,
-      ruleName: log.syncRule?.name,
-      createdAt: log.createdAt.toISOString(),
-    })),
-  };
+    ] = await withDbRetry(() =>
+      Promise.all([
+        prisma.connectedStore.count({ where: { status: { not: "DISCONNECTED" } } }),
+        prisma.syncRule.count({ where: { isActive: true } }),
+        prisma.syncLog.findMany({
+          orderBy: { createdAt: "desc" },
+          take: 10,
+          include: { syncRule: { select: { name: true } } },
+        }),
+        getSubscription(shopDomain),
+        prisma.usageTracker.findUnique({ where: { shopDomain } }),
+        prisma.syncLog.count({ where: { status: "SUCCESS", createdAt: { gte: dayAgo } } }),
+        prisma.syncLog.count({ where: { status: "FAILED", createdAt: { gte: dayAgo } } }),
+      ])
+    );
+
+    return {
+      stats: {
+        connectedStores,
+        activeSyncRules,
+        successCount,
+        errorCount,
+        syncedProducts: usage?.syncedProductCount ?? 0,
+        productLimit: subscription.productLimit,
+        plan: subscription.plan,
+      },
+      recentLogs: recentLogs.map((log) => ({
+        id: log.id,
+        action: log.action,
+        resourceType: log.resourceType,
+        status: log.status,
+        trigger: log.trigger,
+        message: log.message,
+        errorDetail: log.errorDetail,
+        ruleName: log.syncRule?.name,
+        createdAt: log.createdAt.toISOString(),
+      })),
+      loadError: null as string | null,
+    };
+  } catch (e) {
+    console.error("[Dashboard] Loader DB error:", (e as Error).message);
+    return {
+      stats: EMPTY_STATS,
+      recentLogs: [] as Array<{
+        id: string;
+        action: string;
+        resourceType: string;
+        status: string;
+        trigger: string;
+        message: string | null;
+        errorDetail: string | null;
+        ruleName: string | undefined;
+        createdAt: string;
+      }>,
+      loadError:
+        "Couldn't load dashboard stats right now (temporary connection issue). Please reload.",
+    };
+  }
 };
 
 export default function Dashboard() {
-  const { stats, recentLogs } = useLoaderData<typeof loader>();
+  const { stats, recentLogs, loadError } = useLoaderData<typeof loader>();
 
   const usagePercent =
     stats.productLimit > 0 && stats.productLimit < 999999999
@@ -93,6 +117,11 @@ export default function Dashboard() {
     <Page>
       <TitleBar title="Store Sync Dashboard" />
       <BlockStack gap="500">
+        {loadError && (
+          <Banner tone="warning" title="Temporary issue">
+            <p>{loadError}</p>
+          </Banner>
+        )}
         {usagePercent >= 80 && (
           <Banner
             title="Approaching product limit"
@@ -234,6 +263,26 @@ export default function Dashboard() {
           </Layout.Section>
         </Layout>
       </BlockStack>
+    </Page>
+  );
+}
+
+export function ErrorBoundary() {
+  const error = useRouteError();
+  return (
+    <Page>
+      <TitleBar title="Store Sync Dashboard" />
+      <Card>
+        <BlockStack gap="300">
+          <Text as="h2" variant="headingMd">
+            Something went wrong
+          </Text>
+          <Text as="p" tone="subdued">
+            {error instanceof Error ? error.message : "Unexpected error loading the dashboard."}
+          </Text>
+          <Button url="/app">Reload page</Button>
+        </BlockStack>
+      </Card>
     </Page>
   );
 }
