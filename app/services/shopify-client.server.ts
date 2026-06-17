@@ -100,8 +100,15 @@ export class ShopifyGraphQLClient {
     }
 
     if (!response.ok) {
+      // 401/403 means the access token for this shop is invalid or revoked.
+      // Name the shop so logs make it obvious WHICH store needs reconnecting.
+      if (response.status === 401 || response.status === 403) {
+        throw new Error(
+          `Shopify API error: ${response.status} Unauthorized for ${this.shopDomain} — the access token is invalid or expired. Reconnect this store (reinstall the app on it) to mint a fresh token.`
+        );
+      }
       throw new Error(
-        `Shopify API error: ${response.status} ${response.statusText}`
+        `Shopify API error: ${response.status} ${response.statusText} (${this.shopDomain})`
       );
     }
 
