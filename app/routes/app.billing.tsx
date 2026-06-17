@@ -1,6 +1,6 @@
 import type { ActionFunctionArgs, LoaderFunctionArgs } from "@remix-run/node";
 import { json, redirect } from "@remix-run/node";
-import { useLoaderData, useSubmit, useNavigation, useActionData, useRouteError } from "@remix-run/react";
+import { useLoaderData, useNavigation, useActionData, useRouteError } from "@remix-run/react";
 import {
   Page,
   Layout,
@@ -38,6 +38,13 @@ export const loader = async ({ request }: LoaderFunctionArgs) => {
     trialDays: plan.trialDays,
   }));
 
+  // This app uses Shopify "Managed Pricing", so plan changes happen on Shopify's
+  // hosted pricing page (the Billing API mutations are blocked for managed apps).
+  // Point merchants at that page instead of calling appSubscriptionCreate.
+  const shopHandle = shopDomain.replace(/\.myshopify\.com$/, "");
+  const appHandle = process.env.SHOPIFY_APP_HANDLE || "store-sync-auto";
+  const managedPricingUrl = `https://admin.shopify.com/store/${shopHandle}/charges/${appHandle}/pricing_plans`;
+
   try {
     const [subscription, usage] = await withDbRetry(() =>
       Promise.all([
@@ -60,6 +67,7 @@ export const loader = async ({ request }: LoaderFunctionArgs) => {
       },
       usage: { syncedProductCount: usage?.syncedProductCount ?? 0 },
       plans,
+      managedPricingUrl,
       loadError: null as string | null,
     });
   } catch (e) {
@@ -75,6 +83,7 @@ export const loader = async ({ request }: LoaderFunctionArgs) => {
       },
       usage: { syncedProductCount: 0 },
       plans,
+      managedPricingUrl,
       loadError:
         "Couldn't load your current subscription right now (temporary connection issue). Plan changes may be unavailable until you reload.",
     });
@@ -124,9 +133,8 @@ export const action = async ({ request }: ActionFunctionArgs) => {
 };
 
 export default function BillingPage() {
-  const { subscription, usage, plans, loadError } = useLoaderData<typeof loader>();
+  const { subscription, usage, plans, loadError, managedPricingUrl } = useLoaderData<typeof loader>();
   const actionData = useActionData<{ error?: string; success?: boolean; message?: string }>();
-  const submit = useSubmit();
   const navigation = useNavigation();
   const isSubmitting = navigation.state === "submitting";
 
@@ -137,10 +145,6 @@ export default function BillingPage() {
           (usage.syncedProductCount / subscription.productLimit) * 100
         )
       : 0;
-
-  const handleSelectPlan = (planKey: string) => {
-    submit({ plan: planKey }, { method: "POST" });
-  };
 
   return (
     <Page>
@@ -156,6 +160,12 @@ export default function BillingPage() {
             <p>{actionData.error}</p>
           </Banner>
         )}
+        <Banner tone="info">
+          <p>
+            Plans are managed by Shopify. Choosing a plan opens Shopify's secure
+            checkout, and your selection is applied automatically when you return.
+          </p>
+        </Banner>
         {/* Current Plan */}
         <Card>
           <BlockStack gap="400">
@@ -245,9 +255,9 @@ export default function BillingPage() {
 
                   <Button
                     variant={isCurrent ? "secondary" : "primary"}
-                    disabled={isCurrent || isSubmitting}
-                    loading={isSubmitting}
-                    onClick={() => handleSelectPlan(plan.key)}
+                    disabled={isCurrent}
+                    url={isCurrent ? undefined : managedPricingUrl}
+                    target="_top"
                     fullWidth
                   >
                     {isCurrent
