@@ -12,19 +12,19 @@ export const BILLING_PLANS = {
     name: "Basic",
     price: 25,
     productLimit: 500,
-    trialDays: 30,
+    trialDays: 7,
   },
   PRO: {
     name: "Pro",
     price: 50,
     productLimit: 5000,
-    trialDays: 30,
+    trialDays: 7,
   },
   ENTERPRISE: {
     name: "Enterprise",
     price: 150,
     productLimit: Infinity,
-    trialDays: 30,
+    trialDays: 7,
   },
 } as const;
 
