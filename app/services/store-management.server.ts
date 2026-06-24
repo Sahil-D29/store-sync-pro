@@ -4,6 +4,82 @@ import { encrypt, decrypt } from "../utils/encryption.server";
 import { validateStoreToken } from "./shopify-client.server";
 
 /**
+ * Resolve the "account" a shop belongs to. An account is identified by the
+ * base/source store's shopDomain. A base store owns itself; a destination
+ * inherits its base store's domain. A shop with no record yet is its own account
+ * (it will be auto-registered as a base store on first auth).
+ */
+export async function getAccountShop(shopDomain: string): Promise<string> {
+  shopDomain = normalizeDomain(shopDomain);
+  const store = await prisma.connectedStore.findUnique({
+    where: { shopDomain },
+    select: { isBaseStore: true, ownerShop: true },
+  });
+  if (!store) return shopDomain;
+  if (store.isBaseStore) return shopDomain;
+  return store.ownerShop || shopDomain;
+}
+
+/**
+ * Ensure the authenticated shop has a ConnectedStore row. Called from afterAuth
+ * so the source store is registered automatically (no manual "register base"
+ * step). A brand-new shop becomes its own base store / account. An existing
+ * store keeps its role (a destination of another account stays a destination)
+ * and just gets its access token + currency refreshed.
+ */
+export async function ensureStoreRegistered(session: {
+  shop: string;
+  accessToken?: string;
+}): Promise<void> {
+  const shopDomain = normalizeDomain(session.shop);
+  const token = session.accessToken;
+
+  const existing = await prisma.connectedStore.findUnique({
+    where: { shopDomain },
+  });
+
+  if (existing) {
+    // Refresh the stored token (keeps source-store syncs working) and ensure a
+    // legacy base row has its ownerShop set. Never change an existing role.
+    await prisma.connectedStore.update({
+      where: { shopDomain },
+      data: {
+        ...(token ? { accessToken: encrypt(token) } : {}),
+        status: existing.status === "DISCONNECTED" ? "DISCONNECTED" : "ACTIVE",
+        ownerShop:
+          existing.ownerShop ||
+          (existing.isBaseStore ? shopDomain : existing.ownerShop),
+      },
+    });
+    return;
+  }
+
+  // Brand-new shop → register as its own base store (its own account).
+  let shopName: string | undefined;
+  let currencyCode: string | undefined;
+  if (token) {
+    const validation = await validateStoreToken(shopDomain, token);
+    if (validation.valid) {
+      shopName = validation.shopName;
+      currencyCode = validation.currencyCode;
+    }
+  }
+
+  await prisma.connectedStore.create({
+    data: {
+      shopDomain,
+      ownerShop: shopDomain,
+      accessToken: encrypt(token || ""),
+      shopName,
+      currencyCode: currencyCode || "USD",
+      isBaseStore: true,
+      authMethod: "OAUTH" as AuthMethod,
+      status: "ACTIVE",
+    },
+  });
+}
+
+/**
  * Connect a destination store via OAuth (looks up the Shopify session created when
  * the merchant installed the app on the destination store)
  */
@@ -16,18 +92,32 @@ export async function connectStoreViaOAuth(
   error?: string;
 }> {
   shopDomain = normalizeDomain(shopDomain);
+  const ownerShop = await getAccountShop(baseStoreShopDomain);
 
-  if (shopDomain === normalizeDomain(baseStoreShopDomain)) {
-    return { success: false, error: "Cannot connect the base store as a destination" };
+  if (shopDomain === ownerShop) {
+    return { success: false, error: "Cannot connect the source store as a destination" };
   }
 
-  // Check if already connected
+  // The destination store may already have a ConnectedStore row because opening
+  // the app there auto-registers it as its own base store. That's fine — we
+  // convert it into a destination of the connecting account. Only block if it's
+  // a base store that already has its own sync setup under a different account.
   const existing = await prisma.connectedStore.findUnique({
     where: { shopDomain },
+    select: { isBaseStore: true, ownerShop: true, _count: { select: { syncRulesAsSource: true } } },
   });
 
-  if (existing && existing.status !== "DISCONNECTED") {
-    return { success: false, error: "Store is already connected" };
+  if (
+    existing &&
+    existing.isBaseStore &&
+    existing.ownerShop &&
+    existing.ownerShop !== ownerShop &&
+    existing._count.syncRulesAsSource > 0
+  ) {
+    return {
+      success: false,
+      error: `${shopDomain} is already set up as its own source store with sync rules. Remove that setup before connecting it as a destination.`,
+    };
   }
 
   // Look up the offline session created by Shopify OAuth when the app was installed
@@ -67,6 +157,7 @@ export async function connectStoreViaOAuth(
       authMethod: "OAUTH" as AuthMethod,
       status: "ACTIVE",
       isBaseStore: false,
+      ownerShop,
     },
     create: {
       shopDomain,
@@ -76,6 +167,7 @@ export async function connectStoreViaOAuth(
       authMethod: "OAUTH" as AuthMethod,
       status: "ACTIVE",
       isBaseStore: false,
+      ownerShop,
     },
   });
 
@@ -96,14 +188,10 @@ export async function connectStoreWithToken(
 }> {
   // Normalize domain
   shopDomain = normalizeDomain(shopDomain);
+  const ownerShop = await getAccountShop(baseStoreShopDomain);
 
-  // Check if already connected
-  const existing = await prisma.connectedStore.findUnique({
-    where: { shopDomain },
-  });
-
-  if (existing && existing.status !== "DISCONNECTED") {
-    return { success: false, error: "Store is already connected" };
+  if (shopDomain === ownerShop) {
+    return { success: false, error: "Cannot connect the source store as a destination" };
   }
 
   // Validate the token
@@ -127,6 +215,7 @@ export async function connectStoreWithToken(
       authMethod: "CUSTOM_TOKEN" as AuthMethod,
       status: "ACTIVE",
       isBaseStore: false,
+      ownerShop,
     },
     create: {
       shopDomain,
@@ -136,6 +225,7 @@ export async function connectStoreWithToken(
       authMethod: "CUSTOM_TOKEN" as AuthMethod,
       status: "ACTIVE",
       isBaseStore: false,
+      ownerShop,
     },
   });
 
@@ -153,18 +243,15 @@ export async function registerBaseStore(
   shopDomain = normalizeDomain(shopDomain);
   const encryptedToken = encrypt(accessToken);
 
-  // Unset any previous base store
-  await prisma.connectedStore.updateMany({
-    where: { isBaseStore: true },
-    data: { isBaseStore: false },
-  });
-
+  // A base store is its own account (ownerShop = self). Do NOT touch other
+  // accounts' base stores — each merchant has their own isolated base store.
   return prisma.connectedStore.upsert({
     where: { shopDomain },
     update: {
       accessToken: encryptedToken,
       shopName,
       isBaseStore: true,
+      ownerShop: shopDomain,
       authMethod: "OAUTH",
       status: "ACTIVE",
     },
@@ -173,6 +260,7 @@ export async function registerBaseStore(
       accessToken: encryptedToken,
       shopName,
       isBaseStore: true,
+      ownerShop: shopDomain,
       authMethod: "OAUTH",
       status: "ACTIVE",
     },
@@ -205,11 +293,11 @@ export async function disconnectStore(storeId: string): Promise<void> {
 }
 
 /**
- * Get all connected stores
+ * Get all connected stores for a single account (ownerShop).
  */
-export async function getConnectedStores() {
+export async function getConnectedStores(ownerShop: string) {
   return prisma.connectedStore.findMany({
-    where: { status: { not: "DISCONNECTED" } },
+    where: { ownerShop, status: { not: "DISCONNECTED" } },
     orderBy: [{ isBaseStore: "desc" }, { createdAt: "asc" }],
     select: {
       id: true,
@@ -232,20 +320,20 @@ export async function getConnectedStores() {
 }
 
 /**
- * Get base store
+ * Get the base (source) store for an account.
  */
-export async function getBaseStore() {
+export async function getBaseStore(ownerShop: string) {
   return prisma.connectedStore.findFirst({
-    where: { isBaseStore: true, status: "ACTIVE" },
+    where: { ownerShop, isBaseStore: true, status: "ACTIVE" },
   });
 }
 
 /**
- * Get destination stores
+ * Get destination stores for an account.
  */
-export async function getDestinationStores() {
+export async function getDestinationStores(ownerShop: string) {
   return prisma.connectedStore.findMany({
-    where: { isBaseStore: false, status: "ACTIVE" },
+    where: { ownerShop, isBaseStore: false, status: "ACTIVE" },
     orderBy: { createdAt: "asc" },
   });
 }

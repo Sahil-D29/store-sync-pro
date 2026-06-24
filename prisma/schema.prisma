@@ -34,6 +34,10 @@ model Session {
 model ConnectedStore {
   id           String      @id @default(cuid())
   shopDomain   String      @unique
+  // Account this store belongs to = the base/source store's shopDomain.
+  // A base store's ownerShop equals its own shopDomain; destinations inherit
+  // the base store's domain. Used to scope all data per merchant.
+  ownerShop    String?
   shopName     String?
   accessToken  String // encrypted with AES-256
   currencyCode String      @default("USD")
@@ -45,6 +49,8 @@ model ConnectedStore {
   lastSyncAt   DateTime?
   createdAt    DateTime    @default(now())
   updatedAt    DateTime    @updatedAt
+
+  @@index([ownerShop])
 
   syncRulesAsSource          SyncRule[]          @relation("SourceStore")
   syncRulesAsDest            SyncRule[]          @relation("DestStore")
@@ -72,6 +78,7 @@ enum StoreStatus {
 model SyncRule {
   id            String @id @default(cuid())
   name          String
+  ownerShop     String? // account scope = base store domain
   sourceStoreId String
   sourceStore   ConnectedStore @relation("SourceStore", fields: [sourceStoreId], references: [id], onDelete: Cascade)
   destStoreId   String
@@ -114,6 +121,8 @@ model SyncRule {
   updatedAt DateTime  @updatedAt
 
   syncLogs SyncLog[]
+
+  @@index([ownerShop])
 }
 
 enum FilterType {
@@ -150,6 +159,7 @@ enum ScheduleInterval {
 model PriceRule {
   id                 String        @id @default(cuid())
   name               String
+  ownerShop          String? // account scope = base store domain
   type               PriceRuleType
   value              Float // percentage or fixed amount
   targetCurrency     String        @default("USD")
@@ -160,6 +170,8 @@ model PriceRule {
   updatedAt          DateTime      @updatedAt
 
   syncRules SyncRule[]
+
+  @@index([ownerShop])
 }
 
 enum PriceRuleType {

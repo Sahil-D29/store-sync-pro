@@ -28,13 +28,15 @@ import {
   disconnectStore,
   registerBaseStore,
   refreshStoreConnection,
+  getAccountShop,
 } from "../services/store-management.server";
 
 export const loader = async ({ request }: LoaderFunctionArgs) => {
   const { session } = await authenticate.admin(request);
 
   try {
-    const stores = await withDbRetry(() => getConnectedStores());
+    const ownerShop = await withDbRetry(() => getAccountShop(session.shop));
+    const stores = await withDbRetry(() => getConnectedStores(ownerShop));
     return json({
       stores,
       currentShop: session.shop,
@@ -121,15 +123,21 @@ export default function StoresPage() {
   const baseStore = stores.find((s: any) => s.isBaseStore);
   const destinationStores = stores.filter((s: any) => !s.isBaseStore);
 
-  const getInstallUrl = () => {
-    const domain = shopDomain.trim().toLowerCase().replace(/^https?:\/\//, "").replace(/\/$/, "");
-    const storeName = domain.replace(".myshopify.com", "");
+  const buildInstallUrl = (domain: string) => {
+    const d = domain.trim().toLowerCase().replace(/^https?:\/\//, "").replace(/\/$/, "");
+    const storeName = d.replace(".myshopify.com", "");
     return `https://admin.shopify.com/store/${storeName}/oauth/install?client_id=${appClientId}`;
   };
 
   const handleOpenInstallLink = () => {
-    window.open(getInstallUrl(), "_blank");
+    window.open(buildInstallUrl(shopDomain), "_blank");
     setConnectStep("verify");
+  };
+
+  const handleReconnect = (domain: string) => {
+    // Re-open the install link so the merchant re-authorizes and mints a fresh
+    // token, then the store validates on next Refresh.
+    window.open(buildInstallUrl(domain), "_blank");
   };
 
   const handleVerifyConnect = () => {
@@ -281,6 +289,15 @@ export default function StoresPage() {
                         >
                           {store.status}
                         </Badge>
+                        {store.status === "ERROR" && (
+                          <Button
+                            size="slim"
+                            variant="primary"
+                            onClick={() => handleReconnect(store.shopDomain)}
+                          >
+                            Reconnect
+                          </Button>
+                        )}
                         <Button
                           size="slim"
                           onClick={() => handleRefresh(store.id)}

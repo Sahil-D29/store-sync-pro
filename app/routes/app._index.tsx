@@ -20,6 +20,7 @@ import { authenticate } from "../shopify.server";
 import prisma from "../db.server";
 import { getSubscription } from "../services/billing.server";
 import { withDbRetry } from "../utils/db-retry.server";
+import { getAccountShop } from "../services/store-management.server";
 
 const EMPTY_STATS = {
   connectedStores: 0,
@@ -33,9 +34,9 @@ const EMPTY_STATS = {
 
 export const loader = async ({ request }: LoaderFunctionArgs) => {
   const { session } = await authenticate.admin(request);
-  const shopDomain = session.shop;
 
   try {
+    const ownerShop = await withDbRetry(() => getAccountShop(session.shop));
     const dayAgo = new Date(Date.now() - 24 * 60 * 60 * 1000);
     const [
       connectedStores,
@@ -47,17 +48,18 @@ export const loader = async ({ request }: LoaderFunctionArgs) => {
       errorCount,
     ] = await withDbRetry(() =>
       Promise.all([
-        prisma.connectedStore.count({ where: { status: { not: "DISCONNECTED" } } }),
-        prisma.syncRule.count({ where: { isActive: true } }),
+        prisma.connectedStore.count({ where: { ownerShop, status: { not: "DISCONNECTED" } } }),
+        prisma.syncRule.count({ where: { ownerShop, isActive: true } }),
         prisma.syncLog.findMany({
+          where: { syncRule: { ownerShop } },
           orderBy: { createdAt: "desc" },
           take: 10,
           include: { syncRule: { select: { name: true } } },
         }),
-        getSubscription(shopDomain),
-        prisma.usageTracker.findUnique({ where: { shopDomain } }),
-        prisma.syncLog.count({ where: { status: "SUCCESS", createdAt: { gte: dayAgo } } }),
-        prisma.syncLog.count({ where: { status: "FAILED", createdAt: { gte: dayAgo } } }),
+        getSubscription(ownerShop),
+        prisma.usageTracker.findUnique({ where: { shopDomain: ownerShop } }),
+        prisma.syncLog.count({ where: { syncRule: { ownerShop }, status: "SUCCESS", createdAt: { gte: dayAgo } } }),
+        prisma.syncLog.count({ where: { syncRule: { ownerShop }, status: "FAILED", createdAt: { gte: dayAgo } } }),
       ])
     );
 

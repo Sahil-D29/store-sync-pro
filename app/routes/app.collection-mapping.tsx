@@ -20,14 +20,17 @@ import { TitleBar } from "@shopify/app-bridge-react";
 import { authenticate } from "../shopify.server";
 import prisma from "../db.server";
 import { withDbRetry } from "../utils/db-retry.server";
+import { getAccountShop } from "../services/store-management.server";
 import { useRouteError } from "@remix-run/react";
 
 export const loader = async ({ request }: LoaderFunctionArgs) => {
-  await authenticate.admin(request);
+  const { session } = await authenticate.admin(request);
 
   try {
+    const ownerShop = await withDbRetry(() => getAccountShop(session.shop));
     const mappings = await withDbRetry(() =>
       prisma.collectionMapping.findMany({
+        where: { sourceStore: { ownerShop } },
         include: {
           sourceStore: { select: { shopDomain: true, shopName: true } },
           destStore: { select: { shopDomain: true, shopName: true } },

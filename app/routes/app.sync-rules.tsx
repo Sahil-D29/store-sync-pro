@@ -27,6 +27,7 @@ import prisma from "../db.server";
 import { triggerManualSync } from "../services/sync-engine.server";
 import { setupScheduledSync, removeScheduledSync } from "../jobs/queue.server";
 import { withDbRetry } from "../utils/db-retry.server";
+import { getAccountShop } from "../services/store-management.server";
 
 const DEFAULT_FORM = {
   name: "",
@@ -67,9 +68,11 @@ export const loader = async ({ request }: LoaderFunctionArgs) => {
   }
 
   try {
+    const ownerShop = await withDbRetry(() => getAccountShop(session.shop));
     const [syncRules, stores, priceRules] = await withDbRetry(() =>
       Promise.all([
         prisma.syncRule.findMany({
+          where: { ownerShop },
           include: {
             sourceStore: { select: { shopDomain: true, shopName: true } },
             destStore: { select: { shopDomain: true, shopName: true } },
@@ -79,11 +82,12 @@ export const loader = async ({ request }: LoaderFunctionArgs) => {
           orderBy: { createdAt: "desc" },
         }),
         prisma.connectedStore.findMany({
-          where: { status: "ACTIVE" },
+          where: { ownerShop, status: "ACTIVE" },
           select: { id: true, shopDomain: true, shopName: true, isBaseStore: true },
           orderBy: { isBaseStore: "desc" },
         }),
         prisma.priceRule.findMany({
+          where: { ownerShop },
           select: { id: true, name: true, type: true },
           orderBy: { createdAt: "desc" },
         }),
@@ -162,7 +166,8 @@ export const action = async ({ request }: ActionFunctionArgs) => {
         return json({ error: "Name, source store, and destination store are required" }, { status: 400 });
       }
 
-      const newRule = await prisma.syncRule.create({ data });
+      const ownerShop = await getAccountShop(session.shop);
+      const newRule = await prisma.syncRule.create({ data: { ...data, ownerShop } });
 
       if (
         data.scheduleInterval &&

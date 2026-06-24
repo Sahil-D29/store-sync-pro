@@ -21,11 +21,12 @@ import { authenticate } from "../shopify.server";
 import prisma from "../db.server";
 import { syncProduct } from "../services/product-sync.server";
 import { createClientForStore } from "../services/shopify-client.server";
+import { getAccountShop } from "../services/store-management.server";
 
 const PAGE_SIZE = 25;
 
 export const action = async ({ request }: ActionFunctionArgs) => {
-  await authenticate.admin(request);
+  const { session } = await authenticate.admin(request);
   const formData = await request.formData();
   const intent = formData.get("intent") as string;
 
@@ -80,8 +81,9 @@ export const action = async ({ request }: ActionFunctionArgs) => {
 
     case "clear-old": {
       const thirtyDaysAgo = new Date(Date.now() - 30 * 24 * 60 * 60 * 1000);
+      const ownerShop = await getAccountShop(session.shop);
       const deleted = await prisma.syncLog.deleteMany({
-        where: { createdAt: { lt: thirtyDaysAgo } },
+        where: { syncRule: { ownerShop }, createdAt: { lt: thirtyDaysAgo } },
       });
       return json({ success: true, deleted: deleted.count });
     }
@@ -92,7 +94,7 @@ export const action = async ({ request }: ActionFunctionArgs) => {
 };
 
 export const loader = async ({ request }: LoaderFunctionArgs) => {
-  await authenticate.admin(request);
+  const { session } = await authenticate.admin(request);
 
   const url = new URL(request.url);
   const page = parseInt(url.searchParams.get("page") || "1");
@@ -100,7 +102,8 @@ export const loader = async ({ request }: LoaderFunctionArgs) => {
   const resourceType = url.searchParams.get("resourceType") || "";
   const trigger = url.searchParams.get("trigger") || "";
 
-  const where: any = {};
+  // Scope to this account via the sync rule's ownerShop.
+  const where: any = { syncRule: { ownerShop: await getAccountShop(session.shop) } };
   if (status) where.status = status;
   if (resourceType) where.resourceType = resourceType;
   if (trigger) where.trigger = trigger;

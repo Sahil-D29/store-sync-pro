@@ -24,13 +24,16 @@ import { useRouteError } from "@remix-run/react";
 import { authenticate } from "../shopify.server";
 import prisma from "../db.server";
 import { withDbRetry } from "../utils/db-retry.server";
+import { getAccountShop } from "../services/store-management.server";
 
 export const loader = async ({ request }: LoaderFunctionArgs) => {
-  await authenticate.admin(request);
+  const { session } = await authenticate.admin(request);
 
   try {
+    const ownerShop = await withDbRetry(() => getAccountShop(session.shop));
     const priceRules = await withDbRetry(() =>
       prisma.priceRule.findMany({
+        where: { ownerShop },
         include: { _count: { select: { syncRules: true } } },
         orderBy: { createdAt: "desc" },
       })
@@ -55,7 +58,7 @@ export const loader = async ({ request }: LoaderFunctionArgs) => {
 };
 
 export const action = async ({ request }: ActionFunctionArgs) => {
-  await authenticate.admin(request);
+  const { session } = await authenticate.admin(request);
   const formData = await request.formData();
   const intent = formData.get("intent") as string;
 
@@ -79,6 +82,7 @@ export const action = async ({ request }: ActionFunctionArgs) => {
       await prisma.priceRule.create({
         data: {
           name,
+          ownerShop: await getAccountShop(session.shop),
           type: type as any,
           value,
           targetCurrency: targetCurrency || "USD",
