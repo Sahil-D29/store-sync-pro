@@ -117,3 +117,5 @@ export default function ExportPage() {
     </Page>
   );
 }
+
+export { PageErrorBoundary as ErrorBoundary } from "../components/PageErrorBoundary";

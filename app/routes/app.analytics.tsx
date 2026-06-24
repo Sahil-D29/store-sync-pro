@@ -224,3 +224,5 @@ export default function AnalyticsPage() {
     </Page>
   );
 }
+
+export { PageErrorBoundary as ErrorBoundary } from "../components/PageErrorBoundary";

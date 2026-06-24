@@ -214,3 +214,5 @@ export default function BulkSyncPage() {
     </Page>
   );
 }
+
+export { PageErrorBoundary as ErrorBoundary } from "../components/PageErrorBoundary";

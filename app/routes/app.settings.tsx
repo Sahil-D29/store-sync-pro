@@ -289,3 +289,5 @@ export default function SettingsPage() {
     </Page>
   );
 }
+
+export { PageErrorBoundary as ErrorBoundary } from "../components/PageErrorBoundary";

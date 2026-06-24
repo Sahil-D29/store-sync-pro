@@ -237,3 +237,5 @@ export default function RetryDashboardPage() {
     </Page>
   );
 }
+
+export { PageErrorBoundary as ErrorBoundary } from "../components/PageErrorBoundary";
