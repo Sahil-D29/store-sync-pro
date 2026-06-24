@@ -361,17 +361,19 @@ export default function StoresPage() {
           <BlockStack gap="400">
             <Banner tone="info">
               <p>
-                Connect a destination store in 2 steps: first install this app
-                on the destination store, then verify the connection here.
+                Link <strong>another Shopify store that you own and operate</strong> as
+                a sync destination. This app only copies products between stores
+                you control. Connecting takes 2 steps: install this app on that
+                store, then verify the connection here.
               </p>
             </Banner>
 
             <TextField
-              label="Destination store domain"
+              label="Your other store's domain"
               value={shopDomain}
               onChange={setShopDomain}
               placeholder="my-other-store.myshopify.com"
-              helpText="The myshopify.com domain of the destination store"
+              helpText="The .myshopify.com domain of another store you own. This is not the app installation — your current store is already set up as the source."
               autoComplete="off"
             />
 

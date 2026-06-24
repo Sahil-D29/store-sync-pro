@@ -97,6 +97,30 @@ const GET_ACTIVE_SUBSCRIPTIONS_QUERY = `#graphql
 `;
 
 /**
+ * Read the live managed-pricing subscription from Shopify (source of truth).
+ * Returns the active subscription's name + status, or null when the merchant is
+ * on the free plan / has no active charge. Used to keep the in-app "Current
+ * Plan" accurate after a reinstall or a plan change made on Shopify's hosted
+ * pricing page (req 1.2.2). Read-only and best-effort — never throws.
+ */
+export async function getLiveManagedPlan(
+  admin: { graphql: (q: string) => Promise<Response> }
+): Promise<{ name: string; status: string } | null> {
+  try {
+    const response = await admin.graphql(GET_ACTIVE_SUBSCRIPTIONS_QUERY);
+    const result = await response.json();
+    const subs = result?.data?.currentAppInstallation?.activeSubscriptions;
+    if (Array.isArray(subs) && subs.length > 0 && subs[0]?.name) {
+      return { name: subs[0].name, status: subs[0].status };
+    }
+    return null;
+  } catch (e) {
+    console.warn("[Billing] getLiveManagedPlan failed:", (e as Error).message);
+    return null;
+  }
+}
+
+/**
  * Get or create subscription record for a shop
  */
 export async function getSubscription(shopDomain: string) {

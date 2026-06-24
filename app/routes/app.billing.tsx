@@ -21,13 +21,14 @@ import { authenticate } from "../shopify.server";
 import {
   getSubscription,
   createBillingSubscription,
+  getLiveManagedPlan,
   BILLING_PLANS,
 } from "../services/billing.server";
 import prisma from "../db.server";
 import { withDbRetry } from "../utils/db-retry.server";
 
 export const loader = async ({ request }: LoaderFunctionArgs) => {
-  const { session } = await authenticate.admin(request);
+  const { admin, session } = await authenticate.admin(request);
   const shopDomain = session.shop;
 
   const plans = Object.entries(BILLING_PLANS).map(([key, plan]) => ({
@@ -53,14 +54,20 @@ export const loader = async ({ request }: LoaderFunctionArgs) => {
       ])
     );
 
+    // Reconcile with Shopify's live managed subscription (source of truth) so the
+    // displayed plan stays correct after a reinstall or a plan change made on
+    // Shopify's hosted pricing page (req 1.2.2).
+    const livePlan = await getLiveManagedPlan(admin);
     const planName =
+      livePlan?.name ||
       BILLING_PLANS[subscription.plan as keyof typeof BILLING_PLANS]?.name ||
       subscription.plan;
+    const status = livePlan?.status || subscription.status;
 
     return json({
       subscription: {
         plan: subscription.plan,
-        status: subscription.status,
+        status,
         productLimit: subscription.productLimit,
         trialEndsAt: subscription.trialEndsAt?.toISOString() || null,
         planName,
