@@ -519,6 +519,14 @@ async function buildProductSetInput(
           }
         }
 
+        // Mirror the source's inventory tracking so the destination doesn't
+        // show "Inventory not tracked". Only enable tracking when the rule
+        // syncs inventory AND the source variant is actually tracked.
+        if (syncRule.syncInventory && variant.inventoryItem?.tracked) {
+          variantInput.inventoryItem = { tracked: true };
+          variantInput.inventoryPolicy = variant.inventoryPolicy || "DENY";
+        }
+
         // Price transformation
         if (syncRule.priceRule) {
           const transformed = transformPrice(
@@ -602,6 +610,9 @@ function computeProductHash(product: any, priceRule?: PriceRule | null): string 
       price: e.node.price,
       compareAtPrice: e.node.compareAtPrice,
       barcode: e.node.barcode,
+      inventoryQuantity: e.node.inventoryQuantity,
+      inventoryPolicy: e.node.inventoryPolicy,
+      tracked: e.node.inventoryItem?.tracked,
     })),
     metafields: product.metafields?.edges?.map((e: any) => ({
       namespace: e.node.namespace,

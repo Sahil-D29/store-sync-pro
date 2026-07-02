@@ -2,7 +2,10 @@ import type { SyncRule, ConnectedStore, PriceRule } from "@prisma/client";
 import prisma from "../db.server";
 import { ShopifyGraphQLClient } from "./shopify-client.server";
 import { GET_INVENTORY_LEVELS } from "../graphql/queries";
-import { INVENTORY_SET_QUANTITIES_MUTATION } from "../graphql/mutations";
+import {
+  INVENTORY_SET_QUANTITIES_MUTATION,
+  INVENTORY_ACTIVATE_MUTATION,
+} from "../graphql/mutations";
 
 type SyncRuleWithRelations = SyncRule & {
   sourceStore: ConnectedStore;
@@ -138,21 +141,25 @@ export async function syncProductInventory(
       sourceLevel?.quantities?.find((q: any) => q.name === "available")
         ?.quantity ?? 0;
 
-    // Get destination inventory item ID
+    // Get destination inventory item ID + whether it's stocked at the dest location
     const destVariantResult = await destClient.queryWithRetry(
       `#graphql
-      query GetVariantInventory($id: ID!) {
+      query GetVariantInventory($id: ID!, $locationId: ID!) {
         productVariant(id: $id) {
           inventoryItem {
             id
+            inventoryLevel(locationId: $locationId) {
+              id
+            }
           }
         }
       }`,
-      { id: variantMap.destVariantGid }
+      { id: variantMap.destVariantGid, locationId: destLocationId }
     );
 
-    const destInventoryItemId =
-      destVariantResult.data?.productVariant?.inventoryItem?.id;
+    const destInventoryItem =
+      destVariantResult.data?.productVariant?.inventoryItem;
+    const destInventoryItemId = destInventoryItem?.id;
     if (!destInventoryItemId) {
       results.push({
         success: false,
@@ -164,14 +171,51 @@ export async function syncProductInventory(
       continue;
     }
 
-    // Set quantity on destination using compare-and-set
+    // If the item isn't stocked at the destination location yet (common right
+    // after a product is created), activate it there with the starting
+    // quantity. inventorySetQuantities can't set a quantity on an item that
+    // isn't activated at the location, which is why inventory looked "not
+    // tracked" before.
     try {
+      if (!destInventoryItem.inventoryLevel) {
+        const activateResult = await destClient.queryWithRetry(
+          INVENTORY_ACTIVATE_MUTATION,
+          {
+            inventoryItemId: destInventoryItemId,
+            locationId: destLocationId,
+            available: sourceAvailable,
+          }
+        );
+
+        const activateErrors =
+          activateResult.data?.inventoryActivate?.userErrors;
+        if (activateErrors?.length) {
+          results.push({
+            success: false,
+            action: "UPDATE",
+            sourceGid: sourceVariant.id,
+            error: activateErrors[0].message,
+            duration: Date.now() - startTime,
+          });
+        } else {
+          results.push({
+            success: true,
+            action: "UPDATE",
+            sourceGid: sourceVariant.id,
+            duration: Date.now() - startTime,
+          });
+        }
+        continue;
+      }
+
+      // Already stocked at this location — update the available quantity.
       const setResult = await destClient.queryWithRetry(
         INVENTORY_SET_QUANTITIES_MUTATION,
         {
           input: {
             reason: "correction",
             name: "available",
+            ignoreCompareQuantity: true,
             quantities: [
               {
                 inventoryItemId: destInventoryItemId,

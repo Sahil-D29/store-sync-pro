@@ -28,8 +28,10 @@ export const GET_PRODUCT_FOR_SYNC = `#graphql
             price
             compareAtPrice
             inventoryQuantity
+            inventoryPolicy
             inventoryItem {
               id
+              tracked
             }
             selectedOptions {
               name

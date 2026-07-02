@@ -101,6 +101,24 @@ export const COLLECTION_REORDER_PRODUCTS_MUTATION = `#graphql
   }
 `;
 
+export const INVENTORY_ACTIVATE_MUTATION = `#graphql
+  mutation InventoryActivate($inventoryItemId: ID!, $locationId: ID!, $available: Int) {
+    inventoryActivate(
+      inventoryItemId: $inventoryItemId
+      locationId: $locationId
+      available: $available
+    ) {
+      inventoryLevel {
+        id
+      }
+      userErrors {
+        field
+        message
+      }
+    }
+  }
+`;
+
 export const INVENTORY_SET_QUANTITIES_MUTATION = `#graphql
   mutation InventorySetQuantities($input: InventorySetQuantitiesInput!) {
     inventorySetQuantities(input: $input) {
