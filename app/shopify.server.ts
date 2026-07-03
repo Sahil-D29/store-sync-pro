@@ -7,6 +7,7 @@ import {
 import { PrismaSessionStorage } from "@shopify/shopify-app-session-storage-prisma";
 import prisma from "./db.server";
 import { ensureStoreRegistered } from "./services/store-management.server";
+import { withDbRetry } from "./utils/db-retry.server";
 
 const shopify = shopifyApp({
   apiKey: process.env.SHOPIFY_API_KEY,
@@ -41,7 +42,23 @@ const shopify = shopifyApp({
 export default shopify;
 export const apiVersion = ApiVersion.January25;
 export const addDocumentResponseHeaders = shopify.addDocumentResponseHeaders;
-export const authenticate = shopify.authenticate;
+// Wrap authenticate.admin so a brief Postgres restart (the session lookup hits
+// the DB) retries instead of surfacing an "Application Error" to the merchant.
+// Redirect Responses thrown for re-auth aren't transient, so they propagate
+// immediately. All other methods (e.g. webhook) pass through unchanged.
+export const authenticate: typeof shopify.authenticate = new Proxy(
+  shopify.authenticate,
+  {
+    get(target, prop, receiver) {
+      if (prop === "admin") {
+        return (request: Request) =>
+          withDbRetry(() => target.admin(request));
+      }
+      const value = Reflect.get(target, prop, receiver);
+      return typeof value === "function" ? value.bind(target) : value;
+    },
+  }
+);
 export const unauthenticated = shopify.unauthenticated;
 export const login = shopify.login;
 export const registerWebhooks = shopify.registerWebhooks;
