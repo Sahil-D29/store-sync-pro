@@ -1,6 +1,7 @@
-import type { SyncRule, ConnectedStore, PriceRule } from "@prisma/client";
+import type { SyncRule, ConnectedStore, PriceRule, MissingProductAction } from "@prisma/client";
 import prisma from "../db.server";
-import { ShopifyGraphQLClient, createClientForStore } from "./shopify-client.server";
+import type { ShopifyGraphQLClient } from "./shopify-client.server";
+import { createClientForStore } from "./shopify-client.server";
 import {
   GET_COLLECTIONS,
   GET_COLLECTION_PRODUCTS,
@@ -14,6 +15,8 @@ import {
   COLLECTION_REORDER_PRODUCTS_MUTATION,
   COLLECTION_DELETE_MUTATION,
 } from "../graphql/mutations";
+import { syncProduct } from "./product-sync.server";
+import { syncProductExtras } from "./product-extras.server";
 
 type SyncRuleWithRelations = SyncRule & {
   sourceStore: ConnectedStore;
@@ -195,12 +198,16 @@ export async function syncCollection(
         sourceCollectionGid,
         destCollectionGid,
         sourceCollection.sortOrder,
+        existingMapping?.missingProductAction || "SKIP",
         sourceClient,
         destClient
       );
     }
 
-    // Update mapping
+    // Update mapping. Only set syncRuleId on first creation (a manually-created
+    // mapping may already point at a different rule than the one that happens
+    // to be syncing right now) and never overwrite the user's chosen
+    // missingProductAction here.
     await prisma.collectionMapping.upsert({
       where: {
         sourceStoreId_destStoreId_sourceCollectionGid: {
@@ -217,9 +224,10 @@ export async function syncCollection(
       create: {
         sourceStoreId: syncRule.sourceStoreId,
         destStoreId: syncRule.destStoreId,
-        sourceCollectionGid,
         destCollectionGid,
+        sourceCollectionGid,
         sourceHandle: sourceCollection.handle,
+        syncRuleId: syncRule.id,
         status: "SYNCED",
         lastSyncedAt: new Date(),
       },
@@ -259,6 +267,7 @@ async function syncCollectionProducts(
   sourceCollectionGid: string,
   destCollectionGid: string,
   sortOrder: string | null | undefined,
+  missingProductAction: MissingProductAction,
   sourceClient: ShopifyGraphQLClient,
   destClient: ShopifyGraphQLClient
 ): Promise<void> {
@@ -285,6 +294,50 @@ async function syncCollectionProducts(
     if (m.destProductGid) {
       sourceToDest.set(m.sourceProductGid, m.destProductGid);
       managedDestIds.add(m.destProductGid);
+    }
+  }
+
+  // Products in the source collection with no destination mapping yet.
+  // Either skip them (default) or create them on the destination now.
+  if (missingProductAction === "CREATE") {
+    for (const sourceGid of sourceProductGids) {
+      if (sourceToDest.has(sourceGid)) continue;
+
+      const result = await syncProduct(syncRule, sourceGid, sourceClient, destClient);
+
+      if (result.success && result.destGid) {
+        sourceToDest.set(sourceGid, result.destGid);
+        managedDestIds.add(result.destGid);
+
+        const extraErrors = await syncProductExtras(
+          syncRule,
+          sourceGid,
+          result.destGid,
+          sourceClient,
+          destClient
+        );
+        if (extraErrors.length > 0) {
+          console.warn(`[CollectionSync] Extras warnings for ${sourceGid}:`, extraErrors);
+        }
+      }
+
+      await prisma.syncLog.create({
+        data: {
+          syncRuleId: syncRule.id,
+          storeId: syncRule.destStoreId,
+          action: result.action,
+          resourceType: "PRODUCT",
+          sourceGid: result.sourceGid,
+          destGid: result.destGid,
+          status: result.success ? "SUCCESS" : "FAILED",
+          trigger: "MANUAL",
+          message: result.success
+            ? `Product ${result.action.toLowerCase()} while syncing collection`
+            : undefined,
+          errorDetail: result.error,
+          duration: result.duration,
+        },
+      });
     }
   }
 
@@ -500,4 +553,55 @@ export async function fetchAllCollections(
   }
 
   return collections;
+}
+
+/**
+ * Manually re-sync a single collection mapping right now (the "Sync now"
+ * button on the Collection Mapping page), instead of waiting for the next
+ * collections/update webhook. Fire-and-forget from the caller's perspective —
+ * this can take a while for large collections (add/remove/reorder jobs are
+ * polled to completion), so callers should not await this on a request that
+ * needs to return quickly.
+ */
+export async function triggerManualCollectionSync(mappingId: string): Promise<void> {
+  const mapping = await prisma.collectionMapping.findUnique({
+    where: { id: mappingId },
+    include: {
+      syncRule: {
+        include: { sourceStore: true, destStore: true, priceRule: true },
+      },
+    },
+  });
+
+  if (!mapping) throw new Error("Collection mapping not found");
+  if (!mapping.syncRule) {
+    throw new Error("This mapping has no linked sync rule — recreate it to enable manual sync");
+  }
+  if (!mapping.syncRule.isActive) {
+    throw new Error("The linked sync rule is not active");
+  }
+
+  const rule = mapping.syncRule as SyncRuleWithRelations;
+  const sourceClient = await createClientForStore(rule.sourceStoreId);
+  const destClient = await createClientForStore(rule.destStoreId);
+
+  const result = await syncCollection(rule, mapping.sourceCollectionGid, sourceClient, destClient);
+
+  await prisma.syncLog.create({
+    data: {
+      syncRuleId: rule.id,
+      storeId: rule.destStoreId,
+      action: result.action,
+      resourceType: "COLLECTION",
+      sourceGid: result.sourceGid,
+      destGid: result.destGid,
+      status: result.success ? "SUCCESS" : "FAILED",
+      trigger: "MANUAL",
+      message: result.success
+        ? `Collection ${result.action.toLowerCase()} successfully`
+        : undefined,
+      errorDetail: result.error,
+      duration: result.duration,
+    },
+  });
 }

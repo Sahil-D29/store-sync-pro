@@ -3,9 +3,8 @@ import prisma from "../db.server";
 import { createClientForStore, ShopifyGraphQLClient } from "./shopify-client.server";
 import { syncProduct, deleteProductOnDestination } from "./product-sync.server";
 import { syncCollection, deleteCollectionOnDestination } from "./collection-sync.server";
-import { syncProductInventory, syncInventoryItem } from "./inventory-sync.server";
-import { syncMetafields, fetchResourceMetafields } from "./metafield-sync.server";
-import { syncProductImages } from "./media-sync.server";
+import { syncInventoryItem } from "./inventory-sync.server";
+import { syncProductExtras } from "./product-extras.server";
 
 type SyncRuleWithRelations = SyncRule & {
   sourceStore: ConnectedStore;
@@ -266,62 +265,6 @@ export async function handleInventoryWebhook(
       });
     }
   }
-}
-
-/**
- * After a product is synced, handle metafields, images, and inventory
- */
-async function syncProductExtras(
-  rule: SyncRuleWithRelations,
-  sourceProductGid: string,
-  destProductGid: string,
-  sourceClient: any,
-  destClient: any
-): Promise<string[]> {
-  const errors: string[] = [];
-
-  // Sync metafields if enabled
-  if (rule.syncMetafields) {
-    try {
-      const metafields = await fetchResourceMetafields(sourceProductGid, sourceClient);
-      if (metafields.length > 0) {
-        const mfResult = await syncMetafields(destProductGid, metafields, destClient, "PRODUCT");
-        if (!mfResult.success) {
-          errors.push(...mfResult.errors.map((e) => `Metafield: ${e}`));
-        }
-      }
-    } catch (error) {
-      errors.push(`Metafield sync error: ${(error as Error).message}`);
-    }
-  }
-
-  // Sync images if enabled
-  if (rule.syncImages) {
-    try {
-      const imgResult = await syncProductImages(sourceProductGid, destProductGid, sourceClient, destClient);
-      if (!imgResult.success) {
-        errors.push(...imgResult.errors.map((e) => `Image: ${e}`));
-      }
-    } catch (error) {
-      errors.push(`Image sync error: ${(error as Error).message}`);
-    }
-  }
-
-  // Sync inventory if enabled
-  if (rule.syncInventory) {
-    try {
-      const invResults = await syncProductInventory(rule, sourceProductGid, sourceClient, destClient);
-      for (const inv of invResults) {
-        if (!inv.success && inv.error) {
-          errors.push(`Inventory: ${inv.error}`);
-        }
-      }
-    } catch (error) {
-      errors.push(`Inventory sync error: ${(error as Error).message}`);
-    }
-  }
-
-  return errors;
 }
 
 // Concurrency: how many products to sync in parallel.

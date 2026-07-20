@@ -121,6 +121,7 @@ model SyncRule {
   updatedAt DateTime  @updatedAt
 
   syncLogs SyncLog[]
+  collectionMappings CollectionMapping[]
 
   @@index([ownerShop])
 }
@@ -224,16 +225,34 @@ model CollectionMapping {
   destStoreId         String
   destStore           ConnectedStore @relation("DestCollectionStore", fields: [destStoreId], references: [id], onDelete: Cascade)
 
+  // SyncRule that governs this pairing (store pair + price rule + product-status
+  // settings), used for manual "Sync now" and for creating missing products on
+  // the fly. Optional so pre-existing rows (auto-created before this field
+  // existed) keep working.
+  syncRuleId String?
+  syncRule   SyncRule? @relation(fields: [syncRuleId], references: [id], onDelete: SetNull)
+
   sourceCollectionGid String
   destCollectionGid   String?
   sourceHandle        String
   destTitle           String? // optional override
+
+  // What to do when a source collection product has no mapping on the
+  // destination store yet.
+  missingProductAction MissingProductAction @default(SKIP)
+
   lastSyncedAt        DateTime?
   status              MappingStatus @default(PENDING)
   createdAt           DateTime      @default(now())
   updatedAt           DateTime      @updatedAt
 
   @@unique([sourceStoreId, destStoreId, sourceCollectionGid])
+  @@index([syncRuleId])
+}
+
+enum MissingProductAction {
+  SKIP
+  CREATE
 }
 
 // ===== SYNC LOGS =====
