@@ -1,4 +1,4 @@
-import type { SyncRule, ConnectedStore, PriceRule, MissingProductAction } from "@prisma/client";
+import type { CollectionMapping, ConnectedStore } from "@prisma/client";
 import prisma from "../db.server";
 import type { ShopifyGraphQLClient } from "./shopify-client.server";
 import { createClientForStore } from "./shopify-client.server";
@@ -16,12 +16,18 @@ import {
   COLLECTION_DELETE_MUTATION,
 } from "../graphql/mutations";
 import { syncProduct } from "./product-sync.server";
+import type { SyncRuleWithRelations } from "./product-sync.server";
 import { syncProductExtras } from "./product-extras.server";
 
-type SyncRuleWithRelations = SyncRule & {
+/**
+ * Collection Mapping is self-contained — it doesn't depend on the SyncRule
+ * (full-catalog-sync) concept at all. A mapping always exists before
+ * anything about it ever syncs (opt-in only, nothing auto-created), so the
+ * engine operates directly on the mapping row instead of a SyncRule.
+ */
+type CollectionMappingWithStores = CollectionMapping & {
   sourceStore: ConnectedStore;
   destStore: ConnectedStore;
-  priceRule: PriceRule | null;
 };
 
 interface SyncCollectionResult {
@@ -37,12 +43,12 @@ interface SyncCollectionResult {
  * Sync a single collection from source to destination
  */
 export async function syncCollection(
-  syncRule: SyncRuleWithRelations,
-  sourceCollectionGid: string,
+  mapping: CollectionMappingWithStores,
   sourceClient: ShopifyGraphQLClient,
   destClient: ShopifyGraphQLClient
 ): Promise<SyncCollectionResult> {
   const startTime = Date.now();
+  const sourceCollectionGid = mapping.sourceCollectionGid;
 
   try {
     // Fetch collection data from source
@@ -88,23 +94,11 @@ export async function syncCollection(
     }
 
     const sourceCollection = sourceResult.data.collection;
-
-    // Check existing mapping
-    const existingMapping = await prisma.collectionMapping.findUnique({
-      where: {
-        sourceStoreId_destStoreId_sourceCollectionGid: {
-          sourceStoreId: syncRule.sourceStoreId,
-          destStoreId: syncRule.destStoreId,
-          sourceCollectionGid,
-        },
-      },
-    });
-
-    const isNew = !existingMapping?.destCollectionGid;
+    const isNew = !mapping.destCollectionGid;
 
     // Build collection input
     const collectionInput: any = {
-      title: existingMapping?.destTitle || sourceCollection.title,
+      title: mapping.destTitle || sourceCollection.title,
       descriptionHtml: sourceCollection.descriptionHtml,
       seo: sourceCollection.seo,
     };
@@ -170,8 +164,8 @@ export async function syncCollection(
       }
     } else {
       // Update existing collection
-      collectionInput.id = existingMapping!.destCollectionGid;
-      destCollectionGid = existingMapping!.destCollectionGid!;
+      collectionInput.id = mapping.destCollectionGid;
+      destCollectionGid = mapping.destCollectionGid!;
 
       const updateResult = await destClient.queryWithRetry(
         COLLECTION_UPDATE_MUTATION,
@@ -194,40 +188,18 @@ export async function syncCollection(
     // so we only manage membership/order for manual collections.
     if (!sourceCollection.ruleSet) {
       await syncCollectionProducts(
-        syncRule,
-        sourceCollectionGid,
+        mapping,
         destCollectionGid,
         sourceCollection.sortOrder,
-        existingMapping?.missingProductAction || "SKIP",
         sourceClient,
         destClient
       );
     }
 
-    // Update mapping. Only set syncRuleId on first creation (a manually-created
-    // mapping may already point at a different rule than the one that happens
-    // to be syncing right now) and never overwrite the user's chosen
-    // missingProductAction here.
-    await prisma.collectionMapping.upsert({
-      where: {
-        sourceStoreId_destStoreId_sourceCollectionGid: {
-          sourceStoreId: syncRule.sourceStoreId,
-          destStoreId: syncRule.destStoreId,
-          sourceCollectionGid,
-        },
-      },
-      update: {
+    await prisma.collectionMapping.update({
+      where: { id: mapping.id },
+      data: {
         destCollectionGid,
-        status: "SYNCED",
-        lastSyncedAt: new Date(),
-      },
-      create: {
-        sourceStoreId: syncRule.sourceStoreId,
-        destStoreId: syncRule.destStoreId,
-        destCollectionGid,
-        sourceCollectionGid,
-        sourceHandle: sourceCollection.handle,
-        syncRuleId: syncRule.id,
         status: "SYNCED",
         lastSyncedAt: new Date(),
       },
@@ -263,14 +235,15 @@ export async function syncCollection(
  *   to match the exact source order via collectionReorderProducts.
  */
 async function syncCollectionProducts(
-  syncRule: SyncRuleWithRelations,
-  sourceCollectionGid: string,
+  mapping: CollectionMappingWithStores,
   destCollectionGid: string,
   sortOrder: string | null | undefined,
-  missingProductAction: MissingProductAction,
   sourceClient: ShopifyGraphQLClient,
   destClient: ShopifyGraphQLClient
 ): Promise<void> {
+  const sourceCollectionGid = mapping.sourceCollectionGid;
+  const { sourceStoreId, destStoreId } = mapping;
+
   // Fetch all product IDs in the source collection, in collection order.
   const sourceProductGids = await fetchCollectionProductGids(
     sourceClient,
@@ -278,10 +251,10 @@ async function syncCollectionProducts(
   );
 
   // Map source product GIDs -> destination product GIDs (only synced products).
-  const mappings = await prisma.productMapping.findMany({
+  const productMappings = await prisma.productMapping.findMany({
     where: {
-      sourceStoreId: syncRule.sourceStoreId,
-      destStoreId: syncRule.destStoreId,
+      sourceStoreId,
+      destStoreId,
       status: "SYNCED",
       destProductGid: { not: null },
     },
@@ -290,7 +263,7 @@ async function syncCollectionProducts(
 
   const sourceToDest = new Map<string, string>();
   const managedDestIds = new Set<string>();
-  for (const m of mappings) {
+  for (const m of productMappings) {
     if (m.destProductGid) {
       sourceToDest.set(m.sourceProductGid, m.destProductGid);
       managedDestIds.add(m.destProductGid);
@@ -300,18 +273,41 @@ async function syncCollectionProducts(
   // Products in the source collection with no destination mapping yet.
   // Skip them (default), create them on the destination now, or link an
   // already-existing destination product by handle without touching it.
-  if (missingProductAction === "CREATE") {
+  if (mapping.missingProductAction === "CREATE") {
+    // Ad hoc product-sync config built from this mapping's own settings —
+    // no SyncRule involved, so two destinations can use different price
+    // rules/fields even for the same source collection.
+    const priceRule = mapping.createPriceRuleId
+      ? await prisma.priceRule.findUnique({ where: { id: mapping.createPriceRuleId } })
+      : null;
+    const createConfig: SyncRuleWithRelations = {
+      sourceStoreId,
+      destStoreId,
+      sourceStore: mapping.sourceStore,
+      destStore: mapping.destStore,
+      priceRule,
+      excludedFields: null,
+      syncProducts: true,
+      syncVariants: mapping.createSyncVariants,
+      syncInventory: mapping.createSyncInventory,
+      syncMetafields: mapping.createSyncMetafields,
+      syncImages: mapping.createSyncImages,
+      syncSeo: mapping.createSyncSeo,
+      syncTags: mapping.createSyncTags,
+      destProductStatus: mapping.createDestProductStatus,
+    };
+
     for (const sourceGid of sourceProductGids) {
       if (sourceToDest.has(sourceGid)) continue;
 
-      const result = await syncProduct(syncRule, sourceGid, sourceClient, destClient);
+      const result = await syncProduct(createConfig, sourceGid, sourceClient, destClient);
 
       if (result.success && result.destGid) {
         sourceToDest.set(sourceGid, result.destGid);
         managedDestIds.add(result.destGid);
 
         const extraErrors = await syncProductExtras(
-          syncRule,
+          createConfig,
           sourceGid,
           result.destGid,
           sourceClient,
@@ -324,8 +320,7 @@ async function syncCollectionProducts(
 
       await prisma.syncLog.create({
         data: {
-          syncRuleId: syncRule.id,
-          storeId: syncRule.destStoreId,
+          storeId: destStoreId,
           action: result.action,
           resourceType: "PRODUCT",
           sourceGid: result.sourceGid,
@@ -340,12 +335,13 @@ async function syncCollectionProducts(
         },
       });
     }
-  } else if (missingProductAction === "LINK_EXISTING") {
+  } else if (mapping.missingProductAction === "LINK_EXISTING") {
     for (const sourceGid of sourceProductGids) {
       if (sourceToDest.has(sourceGid)) continue;
 
       const linkResult = await linkExistingProductByHandle(
-        syncRule,
+        sourceStoreId,
+        destStoreId,
         sourceGid,
         sourceClient,
         destClient
@@ -358,8 +354,7 @@ async function syncCollectionProducts(
 
       await prisma.syncLog.create({
         data: {
-          syncRuleId: syncRule.id,
-          storeId: syncRule.destStoreId,
+          storeId: destStoreId,
           action: linkResult.linked ? "CREATE" : "SKIP",
           resourceType: "PRODUCT",
           sourceGid,
@@ -460,10 +455,12 @@ interface LinkExistingProductResult {
  * same handle, without ever pushing field updates to it — used when
  * missingProductAction is LINK_EXISTING. Only records the ProductMapping
  * (and variant mappings, matched by SKU) so the collection sync can add it
- * to the destination collection.
+ * to the destination collection. Never needs price rule/field settings since
+ * it deliberately never touches the linked product's fields.
  */
 async function linkExistingProductByHandle(
-  syncRule: SyncRuleWithRelations,
+  sourceStoreId: string,
+  destStoreId: string,
   sourceProductGid: string,
   sourceClient: ShopifyGraphQLClient,
   destClient: ShopifyGraphQLClient
@@ -517,8 +514,8 @@ async function linkExistingProductByHandle(
   await prisma.productMapping.upsert({
     where: {
       sourceStoreId_destStoreId_sourceProductGid: {
-        sourceStoreId: syncRule.sourceStoreId,
-        destStoreId: syncRule.destStoreId,
+        sourceStoreId,
+        destStoreId,
         sourceProductGid,
       },
     },
@@ -529,8 +526,8 @@ async function linkExistingProductByHandle(
       lastSyncedAt: new Date(),
     },
     create: {
-      sourceStoreId: syncRule.sourceStoreId,
-      destStoreId: syncRule.destStoreId,
+      sourceStoreId,
+      destStoreId,
       sourceProductGid,
       destProductGid: destProduct.id,
       sourceHandle: sourceProduct.handle,
@@ -642,23 +639,13 @@ async function waitForJob(
  * Delete a collection from destination store
  */
 export async function deleteCollectionOnDestination(
-  syncRule: SyncRuleWithRelations,
-  sourceCollectionGid: string,
+  mapping: CollectionMappingWithStores,
   destClient: ShopifyGraphQLClient
 ): Promise<SyncCollectionResult> {
   const startTime = Date.now();
+  const sourceCollectionGid = mapping.sourceCollectionGid;
 
-  const mapping = await prisma.collectionMapping.findUnique({
-    where: {
-      sourceStoreId_destStoreId_sourceCollectionGid: {
-        sourceStoreId: syncRule.sourceStoreId,
-        destStoreId: syncRule.destStoreId,
-        sourceCollectionGid,
-      },
-    },
-  });
-
-  if (!mapping?.destCollectionGid) {
+  if (!mapping.destCollectionGid) {
     return {
       success: true,
       action: "SKIP",
@@ -737,34 +724,19 @@ export async function fetchAllCollections(
 export async function triggerManualCollectionSync(mappingId: string): Promise<void> {
   const mapping = await prisma.collectionMapping.findUnique({
     where: { id: mappingId },
-    include: {
-      syncRule: {
-        include: { sourceStore: true, destStore: true, priceRule: true },
-      },
-    },
+    include: { sourceStore: true, destStore: true },
   });
 
   if (!mapping) throw new Error("Collection mapping not found");
-  if (!mapping.syncRule) {
-    throw new Error("This mapping has no linked sync rule — recreate it to enable manual sync");
-  }
-  if (!mapping.syncRule.isActive) {
-    throw new Error("The linked sync rule is not active");
-  }
-  if (!mapping.syncRule.syncCollections) {
-    throw new Error("Collections are turned off for this store connection");
-  }
 
-  const rule = mapping.syncRule as SyncRuleWithRelations;
-  const sourceClient = await createClientForStore(rule.sourceStoreId);
-  const destClient = await createClientForStore(rule.destStoreId);
+  const sourceClient = await createClientForStore(mapping.sourceStoreId);
+  const destClient = await createClientForStore(mapping.destStoreId);
 
-  const result = await syncCollection(rule, mapping.sourceCollectionGid, sourceClient, destClient);
+  const result = await syncCollection(mapping, sourceClient, destClient);
 
   await prisma.syncLog.create({
     data: {
-      syncRuleId: rule.id,
-      storeId: rule.destStoreId,
+      storeId: mapping.destStoreId,
       action: result.action,
       resourceType: "COLLECTION",
       sourceGid: result.sourceGid,

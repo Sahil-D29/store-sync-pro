@@ -1,5 +1,5 @@
 import { createHash } from "crypto";
-import type { SyncRule, PriceRule, ConnectedStore } from "@prisma/client";
+import type { PriceRule, ConnectedStore, DestProductStatus } from "@prisma/client";
 import prisma from "../db.server";
 import {
   ShopifyGraphQLClient,
@@ -19,11 +19,31 @@ interface SyncProductResult {
   duration: number;
 }
 
-type SyncRuleWithRelations = SyncRule & {
+/**
+ * The subset of a SyncRule's configuration actually read by the sync engine
+ * (product-sync/product-extras/inventory-sync/collection-sync). Deliberately
+ * not tied to the SyncRule Prisma model — a real SyncRule row (a superset,
+ * with extra fields like filterType/cronExpression) is still structurally
+ * assignable here, so existing callers built around a real SyncRule keep
+ * working unchanged. This also lets callers with no SyncRule at all (e.g.
+ * Collection Mapping's own create-settings) build one of these ad hoc.
+ */
+export interface SyncRuleWithRelations {
+  sourceStoreId: string;
+  destStoreId: string;
   sourceStore: ConnectedStore;
   destStore: ConnectedStore;
   priceRule: PriceRule | null;
-};
+  excludedFields: string | null;
+  syncProducts: boolean;
+  syncVariants: boolean;
+  syncInventory: boolean;
+  syncMetafields: boolean;
+  syncImages: boolean;
+  syncSeo: boolean;
+  syncTags: boolean;
+  destProductStatus: DestProductStatus;
+}
 
 /**
  * Sync a single product from source to destination

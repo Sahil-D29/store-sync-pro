@@ -1,14 +1,8 @@
-import type { SyncRule, ConnectedStore, PriceRule } from "@prisma/client";
 import type { ShopifyGraphQLClient } from "./shopify-client.server";
+import type { SyncRuleWithRelations } from "./product-sync.server";
 import { syncProductInventory } from "./inventory-sync.server";
 import { syncMetafields, fetchResourceMetafields } from "./metafield-sync.server";
 import { syncProductImages } from "./media-sync.server";
-
-type SyncRuleWithRelations = SyncRule & {
-  sourceStore: ConnectedStore;
-  destStore: ConnectedStore;
-  priceRule: PriceRule | null;
-};
 
 /**
  * After a product is synced, handle metafields, images, and inventory.

@@ -1,4 +1,3 @@
-import type { SyncRule, ConnectedStore, PriceRule } from "@prisma/client";
 import prisma from "../db.server";
 import { ShopifyGraphQLClient } from "./shopify-client.server";
 import { GET_INVENTORY_LEVELS } from "../graphql/queries";
@@ -6,12 +5,7 @@ import {
   INVENTORY_SET_QUANTITIES_MUTATION,
   INVENTORY_ACTIVATE_MUTATION,
 } from "../graphql/mutations";
-
-type SyncRuleWithRelations = SyncRule & {
-  sourceStore: ConnectedStore;
-  destStore: ConnectedStore;
-  priceRule: PriceRule | null;
-};
+import type { SyncRuleWithRelations } from "./product-sync.server";
 
 interface SyncInventoryResult {
   success: boolean;

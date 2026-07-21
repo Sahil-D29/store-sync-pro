@@ -63,8 +63,7 @@ export interface SyncProductJobData {
 }
 
 export interface SyncCollectionJobData {
-  syncRuleId: string;
-  sourceCollectionGid: string;
+  collectionMappingId: string;
   trigger: "WEBHOOK" | "SCHEDULED" | "MANUAL";
 }
 

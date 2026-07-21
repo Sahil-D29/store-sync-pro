@@ -64,16 +64,15 @@ export async function getFailedSyncs(options?: {
 export async function retrySyncItem(logId: string): Promise<{ success: boolean; error?: string }> {
   const logEntry = await prisma.syncLog.findUnique({
     where: { id: logId },
-    include: { syncRule: true },
   });
 
   if (!logEntry) return { success: false, error: "Log entry not found" };
   if (logEntry.status !== "FAILED") return { success: false, error: "Only failed items can be retried" };
-  if (!logEntry.syncRuleId) return { success: false, error: "No sync rule associated" };
 
   try {
     switch (logEntry.resourceType) {
-      case "PRODUCT":
+      case "PRODUCT": {
+        if (!logEntry.syncRuleId) return { success: false, error: "No sync rule associated" };
         if (!logEntry.sourceGid) return { success: false, error: "No source GID" };
         if (!syncProductQueue) return { success: false, error: "Queue unavailable (Redis not connected)" };
         await syncProductQueue.add(`retry-${logEntry.id}`, {
@@ -82,18 +81,30 @@ export async function retrySyncItem(logId: string): Promise<{ success: boolean; 
           trigger: "RETRY",
         });
         break;
+      }
 
-      case "COLLECTION":
-        if (!logEntry.sourceGid) return { success: false, error: "No source GID" };
+      case "COLLECTION": {
+        // Collection Mapping is self-contained (no SyncRule) — look up the
+        // mapping directly via the destination store + source collection
+        // this log was written for.
+        if (!logEntry.sourceGid || !logEntry.storeId) {
+          return { success: false, error: "Missing collection reference" };
+        }
+        const mapping = await prisma.collectionMapping.findFirst({
+          where: { destStoreId: logEntry.storeId, sourceCollectionGid: logEntry.sourceGid },
+          select: { id: true },
+        });
+        if (!mapping) return { success: false, error: "Collection mapping no longer exists" };
         if (!syncCollectionQueue) return { success: false, error: "Queue unavailable (Redis not connected)" };
         await syncCollectionQueue.add(`retry-${logEntry.id}`, {
-          syncRuleId: logEntry.syncRuleId,
-          sourceCollectionGid: logEntry.sourceGid,
+          collectionMappingId: mapping.id,
           trigger: "MANUAL",
         });
         break;
+      }
 
-      case "INVENTORY":
+      case "INVENTORY": {
+        if (!logEntry.syncRuleId) return { success: false, error: "No sync rule associated" };
         if (!logEntry.sourceGid) return { success: false, error: "No source GID" };
         if (!syncInventoryQueue) return { success: false, error: "Queue unavailable (Redis not connected)" };
         await syncInventoryQueue.add(`retry-${logEntry.id}`, {
@@ -103,6 +114,7 @@ export async function retrySyncItem(logId: string): Promise<{ success: boolean; 
           available: 0,
         });
         break;
+      }
 
       default:
         return { success: false, error: `Unsupported resource type: ${logEntry.resourceType}` };

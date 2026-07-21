@@ -121,7 +121,6 @@ model SyncRule {
   updatedAt DateTime  @updatedAt
 
   syncLogs SyncLog[]
-  collectionMappings CollectionMapping[]
 
   @@index([ownerShop])
 }
@@ -171,6 +170,7 @@ model PriceRule {
   updatedAt          DateTime      @updatedAt
 
   syncRules SyncRule[]
+  collectionMappings CollectionMapping[]
 
   @@index([ownerShop])
 }
@@ -225,13 +225,6 @@ model CollectionMapping {
   destStoreId         String
   destStore           ConnectedStore @relation("DestCollectionStore", fields: [destStoreId], references: [id], onDelete: Cascade)
 
-  // SyncRule that governs this pairing (store pair + price rule + product-status
-  // settings), used for manual "Sync now" and for creating missing products on
-  // the fly. Optional so pre-existing rows (auto-created before this field
-  // existed) keep working.
-  syncRuleId String?
-  syncRule   SyncRule? @relation(fields: [syncRuleId], references: [id], onDelete: SetNull)
-
   sourceCollectionGid String
   destCollectionGid   String?
   sourceHandle        String
@@ -246,13 +239,25 @@ model CollectionMapping {
   // if a mapping row like this one exists — nothing is auto-created.
   triggerMode CollectionSyncTrigger @default(REALTIME)
 
+  // Settings used only when missingProductAction = CREATE. Self-contained —
+  // no dependency on the separate SyncRule / full-catalog-sync feature, so
+  // two destinations can use two different price rules.
+  createPriceRuleId       String?
+  createPriceRule         PriceRule?        @relation(fields: [createPriceRuleId], references: [id], onDelete: SetNull)
+  createSyncVariants      Boolean           @default(true)
+  createSyncImages        Boolean           @default(true)
+  createSyncMetafields    Boolean           @default(true)
+  createSyncSeo           Boolean           @default(true)
+  createSyncTags          Boolean           @default(true)
+  createSyncInventory     Boolean           @default(true)
+  createDestProductStatus DestProductStatus @default(SAME_AS_SOURCE)
+
   lastSyncedAt        DateTime?
   status              MappingStatus @default(PENDING)
   createdAt           DateTime      @default(now())
   updatedAt           DateTime      @updatedAt
 
   @@unique([sourceStoreId, destStoreId, sourceCollectionGid])
-  @@index([syncRuleId])
 }
 
 enum MissingProductAction {

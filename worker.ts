@@ -116,13 +116,14 @@ const syncProductWorker = new Worker(
 );
 
 // ===== SYNC COLLECTION WORKER =====
+// Collection Mapping is self-contained (no SyncRule involved) — a mapping
+// always exists before anything about it syncs, so this just loads it
+// directly instead of resolving a SyncRule first.
 const syncCollectionWorker = new Worker(
   "sync-collection",
   async (job) => {
-    const { syncRuleId, sourceCollectionGid, trigger } = job.data;
-    console.log(
-      `[Worker] Processing collection sync: ${sourceCollectionGid} (rule: ${syncRuleId})`
-    );
+    const { collectionMappingId, trigger } = job.data;
+    console.log(`[Worker] Processing collection sync: mapping ${collectionMappingId}`);
 
     const { syncCollection } = await import(
       "./app/services/collection-sync.server.js"
@@ -131,39 +132,24 @@ const syncCollectionWorker = new Worker(
       "./app/services/shopify-client.server.js"
     );
 
-    const rule = await prisma.syncRule.findUnique({
-      where: { id: syncRuleId },
-      include: { sourceStore: true, destStore: true, priceRule: true },
+    const mapping = await prisma.collectionMapping.findUnique({
+      where: { id: collectionMappingId },
+      include: { sourceStore: true, destStore: true },
     });
 
-    if (!rule || !rule.isActive || !rule.syncCollections) {
-      console.log(`[Worker] Rule ${syncRuleId} not found, inactive, or collections disabled, skipping`);
-      return;
-    }
-
-    // Only sync collections the user has explicitly connected — never
-    // auto-create. This mirrors the opt-in check in handleCollectionWebhook.
-    const mapping = await prisma.collectionMapping.findFirst({
-      where: {
-        sourceStoreId: rule.sourceStoreId,
-        destStoreId: rule.destStoreId,
-        sourceCollectionGid,
-      },
-    });
     if (!mapping) {
-      console.log(`[Worker] No explicit mapping for ${sourceCollectionGid}, skipping`);
+      console.log(`[Worker] Collection mapping ${collectionMappingId} not found, skipping`);
       return;
     }
 
-    const sourceClient = await createClientForStore(rule.sourceStoreId);
-    const destClient = await createClientForStore(rule.destStoreId);
+    const sourceClient = await createClientForStore(mapping.sourceStoreId);
+    const destClient = await createClientForStore(mapping.destStoreId);
 
-    const result = await syncCollection(rule, sourceCollectionGid, sourceClient, destClient);
+    const result = await syncCollection(mapping, sourceClient, destClient);
 
     await prisma.syncLog.create({
       data: {
-        syncRuleId: rule.id,
-        storeId: rule.destStoreId,
+        storeId: mapping.destStoreId,
         action: result.action,
         resourceType: "COLLECTION",
         sourceGid: result.sourceGid,
