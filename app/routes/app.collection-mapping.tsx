@@ -28,12 +28,125 @@ import { triggerManualCollectionSync } from "../services/collection-sync.server"
 const MISSING_PRODUCT_OPTIONS = [
   { label: "Skip it", value: "SKIP" },
   { label: "Create it as a new product", value: "CREATE" },
+  { label: "Link it if it already exists on the destination (by handle), otherwise skip", value: "LINK_EXISTING" },
 ];
+
+function ruleSummary(rule: any): string {
+  const parts: string[] = [];
+  if (rule.priceRule?.name) parts.push(`Price rule: ${rule.priceRule.name}`);
+  const syncs = [
+    rule.syncVariants && "Variants",
+    rule.syncImages && "Images",
+    rule.syncMetafields && "Metafields",
+    rule.syncSeo && "SEO",
+    rule.syncTags && "Tags",
+    rule.syncInventory && "Inventory",
+  ].filter(Boolean);
+  if (syncs.length) parts.push(`syncs ${syncs.join(", ")}`);
+  return parts.length ? ` — ${parts.join(" · ")}` : "";
+}
 
 const TRIGGER_MODE_OPTIONS = [
   { label: "Live (real-time)", value: "REALTIME" },
   { label: "Manual only", value: "MANUAL" },
 ];
+
+interface DestSelection {
+  checked: boolean;
+  syncRuleId: string;
+  destMode: "new" | "existing";
+  destCollection: { id: string; title: string } | null;
+}
+
+/**
+ * One destination store's connect options: which sync rule governs it, and
+ * whether to create a new collection or link an existing one on that store.
+ * Owns its own collection-search fetcher so multiple rows can search
+ * independently without stepping on each other.
+ */
+function DestinationConnectRow({
+  store,
+  selection,
+  onChange,
+}: {
+  store: { destStoreId: string; label: string; rules: any[] };
+  selection: DestSelection;
+  onChange: (patch: Partial<DestSelection>) => void;
+}) {
+  const collectionsFetcher = useFetcher<{ collections: Array<{ id: string; title: string; handle: string }> }>();
+  const [query, setQuery] = useState("");
+
+  useEffect(() => {
+    if (selection.checked && selection.destMode === "existing") {
+      collectionsFetcher.load(`/api/store-collections/${store.destStoreId}`);
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [selection.checked, selection.destMode, store.destStoreId]);
+
+  const options = useMemo(() => {
+    const all = collectionsFetcher.data?.collections || [];
+    const filtered = query ? all.filter((c) => c.title.toLowerCase().includes(query.toLowerCase())) : all;
+    return filtered.slice(0, 50).map((c) => ({ value: c.id, label: c.title }));
+  }, [collectionsFetcher.data, query]);
+
+  return (
+    <Card padding="300">
+      <BlockStack gap="200">
+        <Checkbox
+          label={store.label}
+          checked={selection.checked}
+          onChange={(checked) => onChange({ checked })}
+        />
+        {selection.checked && (
+          <BlockStack gap="200">
+            <Select
+              label="Sync rule for this destination"
+              options={store.rules.map((r) => ({
+                value: r.id,
+                label: `${r.name}${ruleSummary(r)}`,
+              }))}
+              value={selection.syncRuleId}
+              onChange={(v) => onChange({ syncRuleId: v })}
+            />
+            <Select
+              label="Destination collection"
+              options={[
+                { label: "Create a new collection", value: "new" },
+                { label: "Link to an existing collection", value: "existing" },
+              ]}
+              value={selection.destMode}
+              onChange={(v) => onChange({ destMode: v as "new" | "existing", destCollection: null })}
+            />
+            {selection.destMode === "existing" && (
+              <Autocomplete
+                options={options}
+                selected={selection.destCollection ? [selection.destCollection.id] : []}
+                onSelect={(sel) => {
+                  const id = sel[0];
+                  const match = collectionsFetcher.data?.collections.find((c) => c.id === id);
+                  if (match) onChange({ destCollection: { id: match.id, title: match.title } });
+                }}
+                loading={collectionsFetcher.state === "loading"}
+                textField={
+                  <Autocomplete.TextField
+                    label="Existing destination collection"
+                    value={selection.destCollection ? selection.destCollection.title : query}
+                    onChange={(v) => {
+                      setQuery(v);
+                      if (selection.destCollection) onChange({ destCollection: null });
+                    }}
+                    placeholder="Search collections"
+                    autoComplete="off"
+                  />
+                }
+              />
+            )}
+          </BlockStack>
+        )}
+      </BlockStack>
+    </Card>
+  );
+}
 
 export const loader = async ({ request }: LoaderFunctionArgs) => {
   const { session } = await authenticate.admin(request);
@@ -60,6 +173,14 @@ export const loader = async ({ request }: LoaderFunctionArgs) => {
             destStoreId: true,
             sourceStore: { select: { shopDomain: true, shopName: true } },
             destStore: { select: { shopDomain: true, shopName: true } },
+            priceRule: { select: { name: true } },
+            syncVariants: true,
+            syncImages: true,
+            syncMetafields: true,
+            syncSeo: true,
+            syncTags: true,
+            syncInventory: true,
+            destProductStatus: true,
           },
           orderBy: { createdAt: "desc" },
         }),
@@ -94,23 +215,32 @@ export const action = async ({ request }: ActionFunctionArgs) => {
 
   switch (intent) {
     case "create-mapping": {
-      const syncRuleIds = (formData.getAll("syncRuleId") as string[]).filter(Boolean);
       const sourceCollectionGid = formData.get("sourceCollectionGid") as string;
       const sourceHandle = (formData.get("sourceHandle") as string) || "";
-      // Linking to an existing destination collection only makes sense when
-      // fanning out to exactly one destination — the UI enforces this too.
-      const destCollectionGid =
-        syncRuleIds.length === 1 ? (formData.get("destCollectionGid") as string) || null : null;
-      const missingProductAction = (formData.get("missingProductAction") as string) === "CREATE" ? "CREATE" : "SKIP";
+      const rawMissingAction = formData.get("missingProductAction") as string;
+      const missingProductAction =
+        rawMissingAction === "CREATE"
+          ? "CREATE"
+          : rawMissingAction === "LINK_EXISTING"
+            ? "LINK_EXISTING"
+            : "SKIP";
       const triggerMode = (formData.get("triggerMode") as string) === "MANUAL" ? "MANUAL" : "REALTIME";
 
-      if (!syncRuleIds.length || !sourceCollectionGid) {
+      let destinations: Array<{ syncRuleId: string; destCollectionGid: string | null }> = [];
+      try {
+        destinations = JSON.parse((formData.get("destinationsJson") as string) || "[]");
+      } catch {
+        return json({ error: "Invalid destination selection" }, { status: 400 });
+      }
+      destinations = destinations.filter((d) => d?.syncRuleId);
+
+      if (!destinations.length || !sourceCollectionGid) {
         return json({ error: "Choose at least one destination and a source collection" }, { status: 400 });
       }
 
       const ownerShop = await getAccountShop(session.shop);
       const rules = await prisma.syncRule.findMany({
-        where: { id: { in: syncRuleIds }, ownerShop },
+        where: { id: { in: destinations.map((d) => d.syncRuleId) }, ownerShop },
         select: { id: true, sourceStoreId: true, destStoreId: true },
       });
 
@@ -118,7 +248,13 @@ export const action = async ({ request }: ActionFunctionArgs) => {
         return json({ error: "Store connection not found" }, { status: 404 });
       }
 
-      for (const rule of rules) {
+      const ruleById = new Map(rules.map((r) => [r.id, r]));
+
+      for (const dest of destinations) {
+        const rule = ruleById.get(dest.syncRuleId);
+        if (!rule) continue;
+        const destCollectionGid = dest.destCollectionGid || null;
+
         await prisma.collectionMapping.upsert({
           where: {
             sourceStoreId_destStoreId_sourceCollectionGid: {
@@ -162,7 +298,13 @@ export const action = async ({ request }: ActionFunctionArgs) => {
 
     case "update-missing-product-action": {
       const mappingId = formData.get("mappingId") as string;
-      const missingProductAction = (formData.get("missingProductAction") as string) === "CREATE" ? "CREATE" : "SKIP";
+      const rawMissingAction = formData.get("missingProductAction") as string;
+      const missingProductAction =
+        rawMissingAction === "CREATE"
+          ? "CREATE"
+          : rawMissingAction === "LINK_EXISTING"
+            ? "LINK_EXISTING"
+            : "SKIP";
       await prisma.collectionMapping.update({
         where: { id: mappingId },
         data: { missingProductAction },
@@ -211,51 +353,52 @@ export default function CollectionMappingPage() {
   const [editTitle, setEditTitle] = useState("");
 
   // ----- Create mapping form state -----
-  // Multiple destination store connections can be ticked at once, to fan one
-  // source collection out to several destination stores in one submission.
-  const [selectedRuleIds, setSelectedRuleIds] = useState<string[]>(
-    syncRules[0] ? [syncRules[0].id] : []
-  );
-  const singleSelectedRule = useMemo(
-    () => (selectedRuleIds.length === 1 ? syncRules.find((r: any) => r.id === selectedRuleIds[0]) : undefined),
-    [syncRules, selectedRuleIds]
-  );
+  // One row per real destination STORE (deduped), not per sync rule. A store
+  // with several sync rules shows one checkbox + a rule picker, instead of a
+  // separate checkbox per rule.
+  const destinationGroups = useMemo(() => {
+    const groups = new Map<string, { destStoreId: string; label: string; rules: any[] }>();
+    for (const r of syncRules as any[]) {
+      if (!groups.has(r.destStoreId)) {
+        groups.set(r.destStoreId, {
+          destStoreId: r.destStoreId,
+          label: r.destStore.shopName || r.destStore.shopDomain,
+          rules: [],
+        });
+      }
+      groups.get(r.destStoreId)!.rules.push(r);
+    }
+    return Array.from(groups.values());
+  }, [syncRules]);
+
+  const [destSelections, setDestSelections] = useState<Record<string, DestSelection>>(() => {
+    const init: Record<string, DestSelection> = {};
+    for (const g of destinationGroups) {
+      init[g.destStoreId] = {
+        checked: false,
+        syncRuleId: g.rules[0]?.id || "",
+        destMode: "new",
+        destCollection: null,
+      };
+    }
+    return init;
+  });
+
+  const updateDestSelection = (storeId: string, patch: Partial<DestSelection>) => {
+    setDestSelections((prev) => ({
+      ...prev,
+      [storeId]: { ...prev[storeId], ...patch },
+    }));
+  };
+
   const [sourceCollection, setSourceCollection] = useState<{ id: string; title: string; handle: string } | null>(null);
-  const [destMode, setDestMode] = useState<"new" | "existing">("new");
-  const [destCollection, setDestCollection] = useState<{ id: string; title: string } | null>(null);
   const [missingProductAction, setMissingProductAction] = useState("SKIP");
   const [triggerMode, setTriggerMode] = useState("REALTIME");
 
-  const toggleRuleId = (ruleId: string, checked: boolean) => {
-    setSelectedRuleIds((prev) => {
-      const next = checked ? [...prev, ruleId] : prev.filter((id) => id !== ruleId);
-      // "Link to existing collection" only makes sense for a single destination.
-      if (next.length !== 1) {
-        setDestMode("new");
-        setDestCollection(null);
-      }
-      return next;
-    });
-  };
-
-  // Destination collections (for "link to existing"), fetched per dest store.
-  const destCollectionsFetcher = useFetcher<{ collections: Array<{ id: string; title: string; handle: string }> }>();
-  const [destQuery, setDestQuery] = useState("");
-
-  useEffect(() => {
-    if (destMode === "existing" && singleSelectedRule?.destStoreId) {
-      destCollectionsFetcher.load(`/api/store-collections/${singleSelectedRule.destStoreId}`);
-    }
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [destMode, singleSelectedRule?.destStoreId]);
-
-  const destCollectionOptions = useMemo(() => {
-    const all = destCollectionsFetcher.data?.collections || [];
-    const filtered = destQuery
-      ? all.filter((c) => c.title.toLowerCase().includes(destQuery.toLowerCase()))
-      : all;
-    return filtered.slice(0, 50).map((c) => ({ value: c.id, label: c.title }));
-  }, [destCollectionsFetcher.data, destQuery]);
+  const chosenDestinations = Object.values(destSelections).filter((s) => s.checked && s.syncRuleId);
+  const hasIncompleteExisting = chosenDestinations.some(
+    (s) => s.destMode === "existing" && !s.destCollection
+  );
 
   const openSourceCollectionPicker = useCallback(async () => {
     try {
@@ -277,21 +420,34 @@ export default function CollectionMappingPage() {
   }, []);
 
   const handleCreateMapping = () => {
-    if (!selectedRuleIds.length || !sourceCollection) return;
+    if (!chosenDestinations.length || !sourceCollection || hasIncompleteExisting) return;
     const fd = new FormData();
     fd.set("intent", "create-mapping");
-    for (const ruleId of selectedRuleIds) fd.append("syncRuleId", ruleId);
+    fd.set(
+      "destinationsJson",
+      JSON.stringify(
+        chosenDestinations.map((s) => ({
+          syncRuleId: s.syncRuleId,
+          destCollectionGid: s.destMode === "existing" && s.destCollection ? s.destCollection.id : null,
+        }))
+      )
+    );
     fd.set("sourceCollectionGid", sourceCollection.id);
     fd.set("sourceHandle", sourceCollection.handle);
-    fd.set("destCollectionGid", destMode === "existing" && destCollection ? destCollection.id : "");
     fd.set("missingProductAction", missingProductAction);
     fd.set("triggerMode", triggerMode);
     submit(fd, { method: "POST" });
+
     setSourceCollection(null);
-    setDestCollection(null);
-    setDestMode("new");
     setMissingProductAction("SKIP");
     setTriggerMode("REALTIME");
+    setDestSelections((prev) => {
+      const reset: Record<string, DestSelection> = {};
+      for (const [storeId, sel] of Object.entries(prev)) {
+        reset[storeId] = { checked: false, syncRuleId: sel.syncRuleId, destMode: "new", destCollection: null };
+      }
+      return reset;
+    });
   };
 
   const handleSaveTitle = (mappingId: string) => {
@@ -364,22 +520,6 @@ export default function CollectionMappingPage() {
 
               <BlockStack gap="150">
                 <Text as="p" variant="bodyMd" fontWeight="medium">
-                  Destination store(s)
-                </Text>
-                <BlockStack gap="100">
-                  {syncRules.map((r: any) => (
-                    <Checkbox
-                      key={r.id}
-                      label={`${r.destStore.shopName || r.destStore.shopDomain} (${r.name})`}
-                      checked={selectedRuleIds.includes(r.id)}
-                      onChange={(checked) => toggleRuleId(r.id, checked)}
-                    />
-                  ))}
-                </BlockStack>
-              </BlockStack>
-
-              <BlockStack gap="150">
-                <Text as="p" variant="bodyMd" fontWeight="medium">
                   Source collection
                 </Text>
                 <InlineStack gap="200" blockAlign="center">
@@ -392,56 +532,28 @@ export default function CollectionMappingPage() {
                 </InlineStack>
               </BlockStack>
 
-              <Select
-                label="Destination collection"
-                options={[
-                  { label: "Create a new collection", value: "new" },
-                  {
-                    label: "Link to an existing collection",
-                    value: "existing",
-                    disabled: selectedRuleIds.length !== 1,
-                  },
-                ]}
-                value={destMode}
-                onChange={(v) => setDestMode(v as "new" | "existing")}
-                helpText={
-                  selectedRuleIds.length > 1
-                    ? "Linking to an existing collection is only available when a single destination is selected — a new collection will be created on each."
-                    : undefined
-                }
-              />
-
-              {destMode === "existing" && selectedRuleIds.length === 1 && (
-                <Autocomplete
-                  options={destCollectionOptions}
-                  selected={destCollection ? [destCollection.id] : []}
-                  onSelect={(selected) => {
-                    const id = selected[0];
-                    const match = destCollectionsFetcher.data?.collections.find((c) => c.id === id);
-                    if (match) setDestCollection({ id: match.id, title: match.title });
-                  }}
-                  loading={destCollectionsFetcher.state === "loading"}
-                  textField={
-                    <Autocomplete.TextField
-                      label="Existing destination collection"
-                      value={destCollection ? destCollection.title : destQuery}
-                      onChange={(v) => {
-                        setDestQuery(v);
-                        if (destCollection) setDestCollection(null);
-                      }}
-                      placeholder="Search collections"
-                      autoComplete="off"
+              <BlockStack gap="150">
+                <Text as="p" variant="bodyMd" fontWeight="medium">
+                  Destination store(s)
+                </Text>
+                <BlockStack gap="200">
+                  {destinationGroups.map((store) => (
+                    <DestinationConnectRow
+                      key={store.destStoreId}
+                      store={store}
+                      selection={destSelections[store.destStoreId]}
+                      onChange={(patch) => updateDestSelection(store.destStoreId, patch)}
                     />
-                  }
-                />
-              )}
+                  ))}
+                </BlockStack>
+              </BlockStack>
 
               <Select
                 label="If a product is missing on the destination"
                 options={MISSING_PRODUCT_OPTIONS}
                 value={missingProductAction}
                 onChange={setMissingProductAction}
-                helpText="Applies when a product in the source collection hasn't been synced to the destination store yet."
+                helpText="Applies when a product in the source collection hasn't been synced to that destination store yet."
               />
 
               <Select
@@ -457,11 +569,7 @@ export default function CollectionMappingPage() {
                   variant="primary"
                   onClick={handleCreateMapping}
                   loading={isSubmitting}
-                  disabled={
-                    !selectedRuleIds.length ||
-                    !sourceCollection ||
-                    (destMode === "existing" && !destCollection)
-                  }
+                  disabled={!chosenDestinations.length || !sourceCollection || hasIncompleteExisting}
                 >
                   Connect collection
                 </Button>

@@ -298,7 +298,8 @@ async function syncCollectionProducts(
   }
 
   // Products in the source collection with no destination mapping yet.
-  // Either skip them (default) or create them on the destination now.
+  // Skip them (default), create them on the destination now, or link an
+  // already-existing destination product by handle without touching it.
   if (missingProductAction === "CREATE") {
     for (const sourceGid of sourceProductGids) {
       if (sourceToDest.has(sourceGid)) continue;
@@ -336,6 +337,41 @@ async function syncCollectionProducts(
             : undefined,
           errorDetail: result.error,
           duration: result.duration,
+        },
+      });
+    }
+  } else if (missingProductAction === "LINK_EXISTING") {
+    for (const sourceGid of sourceProductGids) {
+      if (sourceToDest.has(sourceGid)) continue;
+
+      const linkResult = await linkExistingProductByHandle(
+        syncRule,
+        sourceGid,
+        sourceClient,
+        destClient
+      );
+
+      if (linkResult.success && linkResult.linked && linkResult.destGid) {
+        sourceToDest.set(sourceGid, linkResult.destGid);
+        managedDestIds.add(linkResult.destGid);
+      }
+
+      await prisma.syncLog.create({
+        data: {
+          syncRuleId: syncRule.id,
+          storeId: syncRule.destStoreId,
+          action: linkResult.linked ? "CREATE" : "SKIP",
+          resourceType: "PRODUCT",
+          sourceGid,
+          destGid: linkResult.destGid,
+          status: linkResult.success ? "SUCCESS" : "FAILED",
+          trigger: "MANUAL",
+          message: linkResult.success
+            ? linkResult.linked
+              ? "Linked to existing destination product by handle — no fields changed"
+              : "No destination product with matching handle — skipped"
+            : undefined,
+          errorDetail: linkResult.error,
         },
       });
     }
@@ -410,6 +446,141 @@ async function syncCollectionProducts(
       await waitForJob(destClient, jobId);
     }
   }
+}
+
+interface LinkExistingProductResult {
+  success: boolean;
+  linked: boolean;
+  destGid?: string;
+  error?: string;
+}
+
+/**
+ * Link a source product to an already-existing destination product with the
+ * same handle, without ever pushing field updates to it — used when
+ * missingProductAction is LINK_EXISTING. Only records the ProductMapping
+ * (and variant mappings, matched by SKU) so the collection sync can add it
+ * to the destination collection.
+ */
+async function linkExistingProductByHandle(
+  syncRule: SyncRuleWithRelations,
+  sourceProductGid: string,
+  sourceClient: ShopifyGraphQLClient,
+  destClient: ShopifyGraphQLClient
+): Promise<LinkExistingProductResult> {
+  const sourceResult = await sourceClient.queryWithRetry(
+    `#graphql
+    query GetProductForLink($id: ID!) {
+      product(id: $id) {
+        id
+        handle
+        variants(first: 100) {
+          edges { node { id sku } }
+        }
+      }
+    }`,
+    { id: sourceProductGid }
+  );
+
+  const sourceProduct = sourceResult.data?.product;
+  if (!sourceProduct) {
+    return {
+      success: false,
+      linked: false,
+      error: sourceResult.errors?.[0]?.message || "Source product not found",
+    };
+  }
+
+  const destResult = await destClient.queryWithRetry(
+    `#graphql
+    query GetProductByHandleForLink($handle: String!) {
+      productByHandle(handle: $handle) {
+        id
+        variants(first: 100) {
+          edges { node { id sku } }
+        }
+      }
+    }`,
+    { handle: sourceProduct.handle }
+  );
+
+  const destProduct = destResult.data?.productByHandle;
+  if (!destProduct) {
+    return { success: true, linked: false };
+  }
+
+  const variantMappings = matchVariantsBySku(
+    sourceProduct.variants.edges.map((e: any) => e.node),
+    destProduct.variants.edges.map((e: any) => e.node)
+  );
+
+  await prisma.productMapping.upsert({
+    where: {
+      sourceStoreId_destStoreId_sourceProductGid: {
+        sourceStoreId: syncRule.sourceStoreId,
+        destStoreId: syncRule.destStoreId,
+        sourceProductGid,
+      },
+    },
+    update: {
+      destProductGid: destProduct.id,
+      variantMappings: JSON.stringify(variantMappings),
+      status: "SYNCED",
+      lastSyncedAt: new Date(),
+    },
+    create: {
+      sourceStoreId: syncRule.sourceStoreId,
+      destStoreId: syncRule.destStoreId,
+      sourceProductGid,
+      destProductGid: destProduct.id,
+      sourceHandle: sourceProduct.handle,
+      variantMappings: JSON.stringify(variantMappings),
+      status: "SYNCED",
+      lastSyncedAt: new Date(),
+    },
+  });
+
+  return { success: true, linked: true, destGid: destProduct.id };
+}
+
+/**
+ * Match source/destination variants by SKU first (since a linked product was
+ * created independently, positions won't line up), falling back to position
+ * for anything left unmatched.
+ */
+function matchVariantsBySku(
+  sourceVariants: Array<{ id: string; sku: string | null }>,
+  destVariants: Array<{ id: string; sku: string | null }>
+): Array<{ sourceVariantGid: string; destVariantGid: string; sourceSku: string }> {
+  const destBySku = new Map<string, string>();
+  for (const dv of destVariants) {
+    if (dv.sku) destBySku.set(dv.sku, dv.id);
+  }
+
+  const usedDestIds = new Set<string>();
+  const result: Array<{ sourceVariantGid: string; destVariantGid: string; sourceSku: string }> = [];
+  const unmatchedSource: typeof sourceVariants = [];
+
+  for (const sv of sourceVariants) {
+    const destId = sv.sku ? destBySku.get(sv.sku) : undefined;
+    if (destId && !usedDestIds.has(destId)) {
+      result.push({ sourceVariantGid: sv.id, destVariantGid: destId, sourceSku: sv.sku || "" });
+      usedDestIds.add(destId);
+    } else {
+      unmatchedSource.push(sv);
+    }
+  }
+
+  const unmatchedDest = destVariants.filter((dv) => !usedDestIds.has(dv.id));
+  unmatchedSource.forEach((sv, i) => {
+    result.push({
+      sourceVariantGid: sv.id,
+      destVariantGid: unmatchedDest[i]?.id || "",
+      sourceSku: sv.sku || "",
+    });
+  });
+
+  return result;
 }
 
 /**

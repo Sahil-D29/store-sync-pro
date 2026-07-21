@@ -258,6 +258,7 @@ model CollectionMapping {
 enum MissingProductAction {
   SKIP
   CREATE
+  LINK_EXISTING
 }
 
 enum CollectionSyncTrigger {
