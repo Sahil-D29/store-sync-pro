@@ -241,6 +241,11 @@ model CollectionMapping {
   // destination store yet.
   missingProductAction MissingProductAction @default(SKIP)
 
+  // Whether this specific collection syncs in real time (webhook-driven) or
+  // only when the user clicks "Sync now". Collections are only ever synced
+  // if a mapping row like this one exists — nothing is auto-created.
+  triggerMode CollectionSyncTrigger @default(REALTIME)
+
   lastSyncedAt        DateTime?
   status              MappingStatus @default(PENDING)
   createdAt           DateTime      @default(now())
@@ -253,6 +258,11 @@ model CollectionMapping {
 enum MissingProductAction {
   SKIP
   CREATE
+}
+
+enum CollectionSyncTrigger {
+  REALTIME
+  MANUAL
 }
 
 // ===== SYNC LOGS =====

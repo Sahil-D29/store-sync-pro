@@ -136,8 +136,22 @@ const syncCollectionWorker = new Worker(
       include: { sourceStore: true, destStore: true, priceRule: true },
     });
 
-    if (!rule || !rule.isActive) {
-      console.log(`[Worker] Rule ${syncRuleId} not found or inactive, skipping`);
+    if (!rule || !rule.isActive || !rule.syncCollections) {
+      console.log(`[Worker] Rule ${syncRuleId} not found, inactive, or collections disabled, skipping`);
+      return;
+    }
+
+    // Only sync collections the user has explicitly connected — never
+    // auto-create. This mirrors the opt-in check in handleCollectionWebhook.
+    const mapping = await prisma.collectionMapping.findFirst({
+      where: {
+        sourceStoreId: rule.sourceStoreId,
+        destStoreId: rule.destStoreId,
+        sourceCollectionGid,
+      },
+    });
+    if (!mapping) {
+      console.log(`[Worker] No explicit mapping for ${sourceCollectionGid}, skipping`);
       return;
     }
 

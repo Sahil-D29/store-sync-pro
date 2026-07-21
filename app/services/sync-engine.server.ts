@@ -126,23 +126,29 @@ export async function handleCollectionWebhook(
   shopDomain: string,
   collectionGid: string
 ): Promise<void> {
-  const syncRules = await prisma.syncRule.findMany({
+  // Opt-in only: a collection only ever syncs if the user has explicitly
+  // connected it on the Collection Mapping page. Nothing is auto-created for
+  // collections that were never selected, even if a store connection has
+  // "Collections" + real-time enabled.
+  const mappings = await prisma.collectionMapping.findMany({
     where: {
       sourceStore: { shopDomain },
-      isActive: true,
-      syncCollections: true,
-      syncMode: { in: ["REALTIME", "REALTIME_AND_SCHEDULED"] },
+      sourceCollectionGid: collectionGid,
+      triggerMode: "REALTIME",
+      syncRule: { isActive: true, syncCollections: true },
     },
     include: {
-      sourceStore: true,
-      destStore: true,
-      priceRule: true,
+      syncRule: {
+        include: { sourceStore: true, destStore: true, priceRule: true },
+      },
     },
   });
 
-  if (!syncRules.length) return;
+  if (!mappings.length) return;
 
-  for (const rule of syncRules) {
+  for (const mapping of mappings) {
+    const rule = mapping.syncRule as SyncRuleWithRelations;
+
     try {
       const sourceClient = await createClientForStore(rule.sourceStoreId);
       const destClient = await createClientForStore(rule.destStoreId);
@@ -151,13 +157,13 @@ export async function handleCollectionWebhook(
 
       if (topic.includes("delete")) {
         result = await deleteCollectionOnDestination(
-          rule as SyncRuleWithRelations,
+          rule,
           collectionGid,
           destClient
         );
       } else {
         result = await syncCollection(
-          rule as SyncRuleWithRelations,
+          rule,
           collectionGid,
           sourceClient,
           destClient

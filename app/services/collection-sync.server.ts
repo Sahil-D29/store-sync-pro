@@ -580,6 +580,9 @@ export async function triggerManualCollectionSync(mappingId: string): Promise<vo
   if (!mapping.syncRule.isActive) {
     throw new Error("The linked sync rule is not active");
   }
+  if (!mapping.syncRule.syncCollections) {
+    throw new Error("Collections are turned off for this store connection");
+  }
 
   const rule = mapping.syncRule as SyncRuleWithRelations;
   const sourceClient = await createClientForStore(rule.sourceStoreId);

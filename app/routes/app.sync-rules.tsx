@@ -495,6 +495,7 @@ export default function SyncRulesPage() {
       />
       <Checkbox
         label="Collections"
+        helpText="Master switch for this store connection. Turn on, then choose specific collections to sync on the Collection Mapping page — nothing syncs automatically just from this toggle."
         checked={formData.syncCollections}
         onChange={(v) => setFormData({ ...formData, syncCollections: v })}
       />
