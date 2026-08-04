@@ -336,7 +336,7 @@ export async function triggerManualSync(
   }
 
   // Run the sync in the background so the HTTP request returns immediately
-  const syncErrors: string[] = [];
+  const syncErrors: Array<{ sourceGid: string; error: string }> = [];
   let synced = 0;
   let failed = 0;
   let skipped = 0;
@@ -386,7 +386,10 @@ export async function triggerManualSync(
           else synced++;
         } else {
           failed++;
-          if (result.error) syncErrors.push(result.error);
+          syncErrors.push({
+            sourceGid: result.sourceGid || gid,
+            error: result.error || "Unknown product sync error",
+          });
         }
 
         // Update job progress periodically (every product for small sets, or we could batch this)
@@ -421,7 +424,10 @@ export async function triggerManualSync(
         where: { id: job.id },
         data: {
           status: "FAILED",
-          errors: JSON.stringify([...(syncErrors.slice(0, 49)), (error as Error).message]),
+          errors: JSON.stringify([
+            ...(syncErrors.slice(0, 49)),
+            { sourceGid: "sync-job", error: (error as Error).message },
+          ]),
           completedAt: new Date(),
         },
       });

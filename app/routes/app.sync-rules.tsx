@@ -29,6 +29,40 @@ import { setupScheduledSync, removeScheduledSync } from "../jobs/queue.server";
 import { withDbRetry } from "../utils/db-retry.server";
 import { getAccountShop } from "../services/store-management.server";
 
+type SyncRunError = {
+  sourceGid?: string;
+  error?: string;
+};
+
+type SyncJobView = {
+  jobId: string;
+  total: number;
+  synced: number;
+  failed: number;
+  skipped: number;
+  status: string;
+  errors: SyncRunError[];
+};
+
+function normalizeSyncErrors(errors: unknown): SyncRunError[] {
+  if (!Array.isArray(errors)) return [];
+  return errors.map((entry) => {
+    if (typeof entry === "string") return { error: entry };
+    if (entry && typeof entry === "object") {
+      const record = entry as Record<string, unknown>;
+      return {
+        sourceGid: typeof record.sourceGid === "string" ? record.sourceGid : undefined,
+        error: typeof record.error === "string" ? record.error : JSON.stringify(record),
+      };
+    }
+    return { error: String(entry) };
+  });
+}
+
+function productLabel(sourceGid?: string) {
+  return sourceGid ? sourceGid.replace("gid://shopify/Product/", "#") : "Product";
+}
+
 const DEFAULT_FORM = {
   name: "",
   sourceStoreId: "",
@@ -359,7 +393,7 @@ export default function SyncRulesPage() {
   };
 
   // --- Sync job progress tracking ---
-  const [syncJobs, setSyncJobs] = useState<Record<string, { jobId: string; total: number; synced: number; failed: number; status: string }>>({});
+  const [syncJobs, setSyncJobs] = useState<Record<string, SyncJobView>>({});
   const pollTimers = useRef<Record<string, ReturnType<typeof setInterval>>>({});
 
   const pollJobStatus = useCallback((ruleId: string, jobId: string) => {
@@ -378,20 +412,14 @@ export default function SyncRulesPage() {
             total: data.totalProducts,
             synced: data.syncedProducts,
             failed: data.failedProducts,
+            skipped: data.skippedProducts,
             status: data.status,
+            errors: normalizeSyncErrors(data.errors),
           },
         }));
         if (data.status !== "RUNNING") {
           clearInterval(pollTimers.current[ruleId]);
           delete pollTimers.current[ruleId];
-          // Clear progress after 8 seconds so it doesn't stay forever
-          setTimeout(() => {
-            setSyncJobs((prev) => {
-              const next = { ...prev };
-              delete next[ruleId];
-              return next;
-            });
-          }, 8000);
         }
       } catch {
         // Ignore fetch errors during polling
@@ -403,8 +431,9 @@ export default function SyncRulesPage() {
 
   // Cleanup poll timers on unmount
   useEffect(() => {
+    const timers = pollTimers.current;
     return () => {
-      Object.values(pollTimers.current).forEach(clearInterval);
+      Object.values(timers).forEach(clearInterval);
     };
   }, []);
 
@@ -422,7 +451,15 @@ export default function SyncRulesPage() {
       if (ruleId) {
         setSyncJobs((prev) => ({
           ...prev,
-          [ruleId]: { jobId: data.jobId, total: data.queued || 0, synced: 0, failed: 0, status: "RUNNING" },
+          [ruleId]: {
+            jobId: data.jobId,
+            total: data.queued || 0,
+            synced: 0,
+            failed: 0,
+            skipped: 0,
+            status: "RUNNING",
+            errors: [],
+          },
         }));
         pollJobStatus(ruleId, data.jobId);
       }
@@ -547,8 +584,8 @@ export default function SyncRulesPage() {
           </Banner>
         )}
         {fetcher.data?.success && fetcher.data?.queued !== undefined && (
-          <Banner tone="success" title="Sync complete">
-            <p>Synced {fetcher.data.queued} products. {(fetcher.data.errors?.length ?? 0) > 0 ? `${fetcher.data.errors!.length} errors occurred.` : ""}</p>
+          <Banner tone="success" title="Sync started">
+            <p>Queued {fetcher.data.queued} products. Progress and any failed products will show in the rule row.</p>
           </Banner>
         )}
         {syncRules.length === 0 ? (
@@ -629,7 +666,7 @@ export default function SyncRulesPage() {
                         disabled={syncJobs[rule.id]?.status === "RUNNING"}
                       >
                         {syncJobs[rule.id]?.status === "RUNNING"
-                          ? `Syncing ${syncJobs[rule.id].synced}/${syncJobs[rule.id].total}`
+                          ? `Syncing ${syncJobs[rule.id].synced + syncJobs[rule.id].failed + syncJobs[rule.id].skipped}/${syncJobs[rule.id].total}`
                           : "Sync Now"}
                       </Button>
                       <Button
@@ -650,17 +687,36 @@ export default function SyncRulesPage() {
                       <Box paddingBlockStart="200">
                         <BlockStack gap="100">
                           <ProgressBar
-                            progress={syncJobs[rule.id].total > 0 ? Math.round(((syncJobs[rule.id].synced + syncJobs[rule.id].failed) / syncJobs[rule.id].total) * 100) : 0}
+                            progress={syncJobs[rule.id].total > 0 ? Math.round(((syncJobs[rule.id].synced + syncJobs[rule.id].failed + syncJobs[rule.id].skipped) / syncJobs[rule.id].total) * 100) : 0}
                             size="small"
                             tone={syncJobs[rule.id].status === "COMPLETED" ? "success" : syncJobs[rule.id].status === "FAILED" ? "critical" : "highlight"}
                           />
                           <Text as="span" variant="bodySm" tone={syncJobs[rule.id].failed > 0 ? "critical" : "subdued"}>
                             {syncJobs[rule.id].status === "RUNNING"
-                              ? `Syncing... ${syncJobs[rule.id].synced + syncJobs[rule.id].failed}/${syncJobs[rule.id].total} products`
+                              ? `Syncing... ${syncJobs[rule.id].synced + syncJobs[rule.id].failed + syncJobs[rule.id].skipped}/${syncJobs[rule.id].total} products`
                               : syncJobs[rule.id].status === "COMPLETED"
-                              ? `Done! ${syncJobs[rule.id].synced} synced`
-                              : `Completed with ${syncJobs[rule.id].failed} errors, ${syncJobs[rule.id].synced} synced`}
+                              ? `Done! ${syncJobs[rule.id].synced} synced${syncJobs[rule.id].skipped ? `, ${syncJobs[rule.id].skipped} skipped` : ""}`
+                              : `Completed with ${syncJobs[rule.id].failed} failed, ${syncJobs[rule.id].synced} synced${syncJobs[rule.id].skipped ? `, ${syncJobs[rule.id].skipped} skipped` : ""}`}
                           </Text>
+                          {syncJobs[rule.id].errors.length > 0 && (
+                            <BlockStack gap="050">
+                              {syncJobs[rule.id].errors.slice(0, 8).map((error, errorIndex) => (
+                                <Text
+                                  as="span"
+                                  key={`${error.sourceGid || "error"}-${errorIndex}`}
+                                  variant="bodySm"
+                                  tone="critical"
+                                >
+                                  {productLabel(error.sourceGid)}: {error.error || "Unknown error"}
+                                </Text>
+                              ))}
+                              {syncJobs[rule.id].errors.length > 8 && (
+                                <Text as="span" variant="bodySm" tone="subdued">
+                                  +{syncJobs[rule.id].errors.length - 8} more errors in Sync Logs
+                                </Text>
+                              )}
+                            </BlockStack>
+                          )}
                         </BlockStack>
                       </Box>
                     )}

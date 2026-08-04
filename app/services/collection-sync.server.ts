@@ -54,6 +54,39 @@ interface SyncCollectionResult {
   duration: number;
 }
 
+type SyncRunError = {
+  sourceGid: string;
+  error: string;
+};
+
+type CollectionSyncRunStats = {
+  jobId?: string;
+  totalProducts: number;
+  syncedProducts: number;
+  failedProducts: number;
+  skippedProducts: number;
+  errors: SyncRunError[];
+};
+
+async function updateCollectionRunJob(stats: CollectionSyncRunStats) {
+  if (!stats.jobId) return;
+
+  try {
+    await prisma.syncJob.update({
+      where: { id: stats.jobId },
+      data: {
+        totalProducts: stats.totalProducts,
+        syncedProducts: stats.syncedProducts,
+        failedProducts: stats.failedProducts,
+        skippedProducts: stats.skippedProducts,
+        errors: stats.errors.length > 0 ? JSON.stringify(stats.errors.slice(0, 50)) : null,
+      },
+    });
+  } catch (error) {
+    console.warn(`[CollectionSync] Failed to update sync job ${stats.jobId}:`, error);
+  }
+}
+
 const COLLECTION_FIELDS = `#graphql
   fragment CollectionFields on Collection {
     id
@@ -161,7 +194,8 @@ async function fetchSourceCollectionData(
 export async function syncCollection(
   mapping: CollectionMappingWithStores,
   sourceClient: ShopifyGraphQLClient,
-  destClient: ShopifyGraphQLClient
+  destClient: ShopifyGraphQLClient,
+  runStats?: CollectionSyncRunStats
 ): Promise<SyncCollectionResult> {
   const startTime = Date.now();
   const sourceCollectionGid = mapping.sourceCollectionGid;
@@ -269,7 +303,8 @@ export async function syncCollection(
         destCollectionGid,
         sourceCollection.sortOrder,
         sourceClient,
-        destClient
+        destClient,
+        runStats
       );
     }
 
@@ -316,7 +351,8 @@ async function syncCollectionProducts(
   destCollectionGid: string,
   sortOrder: string | null | undefined,
   sourceClient: ShopifyGraphQLClient,
-  destClient: ShopifyGraphQLClient
+  destClient: ShopifyGraphQLClient,
+  runStats?: CollectionSyncRunStats
 ): Promise<void> {
   const sourceCollectionGid = mapping.sourceCollectionGid;
   const { sourceStoreId, destStoreId } = mapping;
@@ -326,6 +362,14 @@ async function syncCollectionProducts(
     sourceClient,
     sourceCollectionGid
   );
+  if (runStats) {
+    runStats.totalProducts = sourceProductGids.length;
+    runStats.syncedProducts = 0;
+    runStats.failedProducts = 0;
+    runStats.skippedProducts = 0;
+    runStats.errors = [];
+    await updateCollectionRunJob(runStats);
+  }
 
   // Map source product GIDs -> destination product GIDs (only synced products).
   const productMappings = await prisma.productMapping.findMany({
@@ -345,6 +389,11 @@ async function syncCollectionProducts(
       sourceToDest.set(m.sourceProductGid, m.destProductGid);
       managedDestIds.add(m.destProductGid);
     }
+  }
+
+  if (runStats) {
+    runStats.syncedProducts = sourceProductGids.filter((gid) => sourceToDest.has(gid)).length;
+    await updateCollectionRunJob(runStats);
   }
 
   // Products in the source collection with no destination mapping yet.
@@ -382,6 +431,7 @@ async function syncCollectionProducts(
       if (result.success && result.destGid) {
         sourceToDest.set(sourceGid, result.destGid);
         managedDestIds.add(result.destGid);
+        if (runStats) runStats.syncedProducts++;
 
         const extraErrors = await syncProductExtras(
           createConfig,
@@ -393,6 +443,14 @@ async function syncCollectionProducts(
         if (extraErrors.length > 0) {
           console.warn(`[CollectionSync] Extras warnings for ${sourceGid}:`, extraErrors);
         }
+      } else if (result.success) {
+        if (runStats) runStats.skippedProducts++;
+      } else if (runStats) {
+        runStats.failedProducts++;
+        runStats.errors.push({
+          sourceGid: result.sourceGid || sourceGid,
+          error: result.error || "Unknown product sync error",
+        });
       }
 
       await prisma.syncLog.create({
@@ -411,6 +469,7 @@ async function syncCollectionProducts(
           duration: result.duration,
         },
       });
+      if (runStats) await updateCollectionRunJob(runStats);
     }
   } else if (mapping.missingProductAction === "LINK_EXISTING") {
     for (const sourceGid of sourceProductGids) {
@@ -427,6 +486,15 @@ async function syncCollectionProducts(
       if (linkResult.success && linkResult.linked && linkResult.destGid) {
         sourceToDest.set(sourceGid, linkResult.destGid);
         managedDestIds.add(linkResult.destGid);
+        if (runStats) runStats.syncedProducts++;
+      } else if (linkResult.success) {
+        if (runStats) runStats.skippedProducts++;
+      } else if (runStats) {
+        runStats.failedProducts++;
+        runStats.errors.push({
+          sourceGid,
+          error: linkResult.error || "Failed to link existing product by handle",
+        });
       }
 
       await prisma.syncLog.create({
@@ -446,7 +514,11 @@ async function syncCollectionProducts(
           errorDetail: linkResult.error,
         },
       });
+      if (runStats) await updateCollectionRunJob(runStats);
     }
+  } else if (runStats) {
+    runStats.skippedProducts = sourceProductGids.length - runStats.syncedProducts;
+    await updateCollectionRunJob(runStats);
   }
 
   // Desired destination products, in the SAME order as the source collection.
@@ -869,7 +941,9 @@ export async function fetchAllCollections(
  * polled to completion), so callers should not await this on a request that
  * needs to return quickly.
  */
-export async function triggerManualCollectionSync(mappingId: string): Promise<void> {
+export async function triggerManualCollectionSync(
+  mappingId: string
+): Promise<{ jobId: string; queued: number; errors: string[] }> {
   const mapping = await prisma.collectionMapping.findUnique({
     where: { id: mappingId },
     include: { sourceStore: true, destStore: true },
@@ -877,25 +951,94 @@ export async function triggerManualCollectionSync(mappingId: string): Promise<vo
 
   if (!mapping) throw new Error("Collection mapping not found");
 
-  const sourceClient = await createClientForStore(mapping.sourceStoreId);
-  const destClient = await createClientForStore(mapping.destStoreId);
-
-  const result = await syncCollection(mapping, sourceClient, destClient);
-
-  await prisma.syncLog.create({
+  const job = await prisma.syncJob.create({
     data: {
-      storeId: mapping.destStoreId,
-      action: result.action,
-      resourceType: "COLLECTION",
-      sourceGid: result.sourceGid,
-      destGid: result.destGid,
-      status: result.success ? "SUCCESS" : "FAILED",
+      syncRuleId: mapping.id,
+      totalProducts: 0,
       trigger: "MANUAL",
-      message: result.success
-        ? `Collection ${result.action.toLowerCase()} successfully`
-        : undefined,
-      errorDetail: result.error,
-      duration: result.duration,
     },
   });
+
+  const runBackground = async () => {
+    const runStats: CollectionSyncRunStats = {
+      jobId: job.id,
+      totalProducts: 0,
+      syncedProducts: 0,
+      failedProducts: 0,
+      skippedProducts: 0,
+      errors: [],
+    };
+
+    try {
+      const sourceClient = await createClientForStore(mapping.sourceStoreId);
+      const destClient = await createClientForStore(mapping.destStoreId);
+      const result = await syncCollection(mapping, sourceClient, destClient, runStats);
+
+      if (!result.success) {
+        runStats.errors.push({
+          sourceGid: result.sourceGid,
+          error: result.error || "Collection sync failed",
+        });
+      }
+
+      await prisma.syncLog.create({
+        data: {
+          storeId: mapping.destStoreId,
+          action: result.action,
+          resourceType: "COLLECTION",
+          sourceGid: result.sourceGid,
+          destGid: result.destGid,
+          status: result.success ? "SUCCESS" : "FAILED",
+          trigger: "MANUAL",
+          message: result.success
+            ? `Collection ${result.action.toLowerCase()} successfully`
+            : undefined,
+          errorDetail: result.error,
+          duration: result.duration,
+        },
+      });
+
+      await prisma.syncJob.update({
+        where: { id: job.id },
+        data: {
+          status:
+            result.success && runStats.failedProducts === 0
+              ? "COMPLETED"
+              : result.success
+                ? "COMPLETED_WITH_ERRORS"
+                : "FAILED",
+          totalProducts: runStats.totalProducts,
+          syncedProducts: runStats.syncedProducts,
+          failedProducts: runStats.failedProducts,
+          skippedProducts: runStats.skippedProducts,
+          errors: runStats.errors.length > 0 ? JSON.stringify(runStats.errors.slice(0, 50)) : null,
+          completedAt: new Date(),
+        },
+      });
+    } catch (error) {
+      console.error(`[CollectionSync] Job ${job.id} FAILED:`, error);
+      runStats.errors.push({
+        sourceGid: mapping.sourceCollectionGid,
+        error: (error as Error).message,
+      });
+      await prisma.syncJob.update({
+        where: { id: job.id },
+        data: {
+          status: "FAILED",
+          totalProducts: runStats.totalProducts,
+          syncedProducts: runStats.syncedProducts,
+          failedProducts: runStats.failedProducts,
+          skippedProducts: runStats.skippedProducts,
+          errors: JSON.stringify(runStats.errors.slice(0, 50)),
+          completedAt: new Date(),
+        },
+      });
+    }
+  };
+
+  runBackground().catch((err) =>
+    console.error(`[CollectionSync] Background sync fatal:`, err)
+  );
+
+  return { jobId: job.id, queued: 0, errors: [] };
 }

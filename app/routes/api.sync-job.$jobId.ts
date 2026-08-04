@@ -16,6 +16,16 @@ export async function loader({ request, params }: LoaderFunctionArgs) {
   const job = await getSyncJobStatus(jobId);
   if (!job) return json({ error: "Job not found" }, { status: 404 });
 
+  let errors: unknown[] = [];
+  if (job.errors) {
+    try {
+      const parsed = JSON.parse(job.errors);
+      errors = Array.isArray(parsed) ? parsed : [parsed];
+    } catch {
+      errors = [job.errors];
+    }
+  }
+
   return json({
     id: job.id,
     status: job.status,
@@ -23,7 +33,7 @@ export async function loader({ request, params }: LoaderFunctionArgs) {
     syncedProducts: job.syncedProducts,
     failedProducts: job.failedProducts,
     skippedProducts: job.skippedProducts,
-    errors: job.errors ? JSON.parse(job.errors) : [],
+    errors,
     startedAt: job.startedAt,
     completedAt: job.completedAt,
   });

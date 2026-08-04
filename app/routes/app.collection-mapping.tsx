@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type { ActionFunctionArgs, LoaderFunctionArgs } from "@remix-run/node";
 import { json } from "@remix-run/node";
 import { useLoaderData, useSubmit, useNavigation, useFetcher, useRouteError } from "@remix-run/react";
@@ -17,6 +17,8 @@ import {
   IndexTable,
   Banner,
   EmptyState,
+  Box,
+  ProgressBar,
 } from "@shopify/polaris";
 import { TitleBar } from "@shopify/app-bridge-react";
 import { authenticate } from "../shopify.server";
@@ -54,6 +56,41 @@ interface DestSelection {
   createSyncTags: boolean;
   createSyncInventory: boolean;
   createDestProductStatus: string;
+}
+
+type SyncRunError = {
+  sourceGid?: string;
+  error?: string;
+};
+
+type SyncJobView = {
+  jobId: string;
+  total: number;
+  synced: number;
+  failed: number;
+  skipped: number;
+  status: string;
+  errors: SyncRunError[];
+};
+
+function normalizeSyncErrors(errors: unknown): SyncRunError[] {
+  if (!Array.isArray(errors)) return [];
+  return errors.map((entry) => {
+    if (typeof entry === "string") return { error: entry };
+    if (entry && typeof entry === "object") {
+      const record = entry as Record<string, unknown>;
+      return {
+        sourceGid: typeof record.sourceGid === "string" ? record.sourceGid : undefined,
+        error: typeof record.error === "string" ? record.error : JSON.stringify(record),
+      };
+    }
+    return { error: String(entry) };
+  });
+}
+
+function sourceLabel(sourceGid?: string) {
+  if (!sourceGid) return "Product";
+  return sourceGid.replace("gid://shopify/Product/", "#").replace("gid://shopify/Collection/", "Collection #");
 }
 
 const DEFAULT_DEST_SELECTION: DestSelection = {
@@ -408,12 +445,8 @@ export const action = async ({ request }: ActionFunctionArgs) => {
 
     case "sync-now": {
       const mappingId = formData.get("mappingId") as string;
-      // Fire-and-forget: a full add/remove/reorder pass can take longer than
-      // this request should wait. Results land in Sync Logs.
-      triggerManualCollectionSync(mappingId).catch((err) =>
-        console.error(`[CollectionMapping] Manual sync failed for ${mappingId}:`, (err as Error).message)
-      );
-      return json({ success: true, started: true });
+      const result = await triggerManualCollectionSync(mappingId);
+      return json({ success: true, started: true, ...result });
     }
 
     case "delete": {
@@ -430,8 +463,11 @@ export const action = async ({ request }: ActionFunctionArgs) => {
 export default function CollectionMappingPage() {
   const { mappings, destStores, priceRules, loadError } = useLoaderData<typeof loader>();
   const submit = useSubmit();
+  const syncFetcher = useFetcher<{ success?: boolean; jobId?: string; queued?: number; error?: string }>();
   const navigation = useNavigation();
   const isSubmitting = navigation.state === "submitting";
+  const [syncJobs, setSyncJobs] = useState<Record<string, SyncJobView>>({});
+  const pollTimers = useRef<Record<string, ReturnType<typeof setInterval>>>({});
 
   const [editingId, setEditingId] = useState<string | null>(null);
   const [editTitle, setEditTitle] = useState("");
@@ -532,8 +568,68 @@ export default function CollectionMappingPage() {
   };
 
   const handleSyncNow = (mappingId: string) => {
-    submit({ intent: "sync-now", mappingId }, { method: "POST" });
+    syncFetcher.submit({ intent: "sync-now", mappingId }, { method: "POST" });
   };
+
+  const pollJobStatus = useCallback((mappingId: string, jobId: string) => {
+    if (pollTimers.current[mappingId]) clearInterval(pollTimers.current[mappingId]);
+
+    const timer = setInterval(async () => {
+      try {
+        const res = await fetch(`/api/sync-job/${jobId}`);
+        if (!res.ok) return;
+        const data = await res.json();
+        setSyncJobs((prev) => ({
+          ...prev,
+          [mappingId]: {
+            jobId,
+            total: data.totalProducts,
+            synced: data.syncedProducts,
+            failed: data.failedProducts,
+            skipped: data.skippedProducts,
+            status: data.status,
+            errors: normalizeSyncErrors(data.errors),
+          },
+        }));
+        if (data.status !== "RUNNING") {
+          clearInterval(pollTimers.current[mappingId]);
+          delete pollTimers.current[mappingId];
+        }
+      } catch {
+        // Ignore transient polling errors.
+      }
+    }, 2000);
+
+    pollTimers.current[mappingId] = timer;
+  }, []);
+
+  useEffect(() => {
+    const timers = pollTimers.current;
+    return () => {
+      Object.values(timers).forEach(clearInterval);
+    };
+  }, []);
+
+  useEffect(() => {
+    if (!syncFetcher.data?.success || !syncFetcher.data.jobId) return;
+
+    const mappingId = syncFetcher.formData?.get("mappingId") as string | null;
+    if (!mappingId) return;
+
+    setSyncJobs((prev) => ({
+      ...prev,
+      [mappingId]: {
+        jobId: syncFetcher.data!.jobId!,
+        total: syncFetcher.data!.queued || 0,
+        synced: 0,
+        failed: 0,
+        skipped: 0,
+        status: "RUNNING",
+        errors: [],
+      },
+    }));
+    pollJobStatus(mappingId, syncFetcher.data.jobId);
+  }, [syncFetcher.data, syncFetcher.formData, pollJobStatus]);
 
   const handleMissingProductActionChange = (mappingId: string, value: string) => {
     submit(
@@ -549,6 +645,52 @@ export default function CollectionMappingPage() {
     );
   };
 
+  const renderSyncJob = (job?: SyncJobView) => {
+    if (!job) return null;
+    const processed = job.synced + job.failed + job.skipped;
+    const progress = job.total > 0 ? Math.round((processed / job.total) * 100) : 0;
+
+    return (
+      <Box paddingBlockStart="200">
+        <BlockStack gap="100">
+          <ProgressBar
+            progress={progress}
+            size="small"
+            tone={job.status === "COMPLETED" ? "success" : job.status === "FAILED" ? "critical" : "highlight"}
+          />
+          <Text as="span" variant="bodySm" tone={job.failed > 0 || job.status === "FAILED" ? "critical" : "subdued"}>
+            {job.status === "RUNNING"
+              ? `Syncing... ${processed}/${job.total} products`
+              : job.status === "COMPLETED"
+                ? `Done! ${job.synced} synced${job.skipped ? `, ${job.skipped} skipped` : ""}`
+                : job.status === "FAILED"
+                  ? `Sync failed after ${processed}/${job.total} products`
+                  : `Completed with ${job.failed} failed, ${job.synced} synced${job.skipped ? `, ${job.skipped} skipped` : ""}`}
+          </Text>
+          {job.errors.length > 0 && (
+            <BlockStack gap="050">
+              {job.errors.slice(0, 8).map((error, errorIndex) => (
+                <Text
+                  as="span"
+                  key={`${error.sourceGid || "error"}-${errorIndex}`}
+                  variant="bodySm"
+                  tone="critical"
+                >
+                  {sourceLabel(error.sourceGid)}: {error.error || "Unknown error"}
+                </Text>
+              ))}
+              {job.errors.length > 8 && (
+                <Text as="span" variant="bodySm" tone="subdued">
+                  +{job.errors.length - 8} more errors in Sync Logs
+                </Text>
+              )}
+            </BlockStack>
+          )}
+        </BlockStack>
+      </Box>
+    );
+  };
+
   return (
     <Page>
       <TitleBar title="Collection Mapping" />
@@ -557,6 +699,11 @@ export default function CollectionMappingPage() {
         {loadError && (
           <Banner tone="warning" title="Temporary issue">
             <p>{loadError}</p>
+          </Banner>
+        )}
+        {syncFetcher.data?.error && (
+          <Banner tone="critical" title="Error">
+            <p>{syncFetcher.data.error}</p>
           </Banner>
         )}
         <Banner tone="info">
@@ -769,7 +916,11 @@ export default function CollectionMappingPage() {
                       <Button
                         size="slim"
                         onClick={() => handleSyncNow(mapping.id)}
-                        loading={isSubmitting}
+                        loading={
+                          syncJobs[mapping.id]?.status === "RUNNING" ||
+                          (syncFetcher.state !== "idle" && syncFetcher.formData?.get("mappingId") === mapping.id)
+                        }
+                        disabled={syncJobs[mapping.id]?.status === "RUNNING"}
                       >
                         Sync now
                       </Button>
@@ -782,6 +933,7 @@ export default function CollectionMappingPage() {
                         Remove
                       </Button>
                     </InlineStack>
+                    {renderSyncJob(syncJobs[mapping.id])}
                   </IndexTable.Cell>
                 </IndexTable.Row>
               ))}
