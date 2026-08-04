@@ -523,6 +523,12 @@ async function fetchFilteredProducts(
     if (collectionIds.length > 0) {
       const productGids: string[] = [];
       const seen = new Set<string>();
+      const addProductGid = (gid: string) => {
+        if (!seen.has(gid)) {
+          seen.add(gid);
+          productGids.push(gid);
+        }
+      };
 
       for (const collectionGid of collectionIds) {
         let hasNext = true;
@@ -557,9 +563,15 @@ async function fetchFilteredProducts(
 
           const collection = result.data?.collection;
           if (!collection) {
-            throw new Error(
-              `Selected collection ${collectionGid} was not found on ${rule.sourceStore.shopDomain}. Re-select the collection from the source store.`
+            console.warn(
+              `[SyncEngine] Collection ${collectionGid} is not visible via collection(id:) on ${rule.sourceStore.shopDomain}; falling back to products collection_id search`
             );
+            const fallbackProductGids = await fetchProductGidsByCollectionId(
+              collectionGid,
+              sourceClient
+            );
+            fallbackProductGids.forEach(addProductGid);
+            break;
           }
 
           const products = collection.products;
@@ -571,10 +583,7 @@ async function fetchFilteredProducts(
           }
 
           for (const edge of products.edges) {
-            if (!seen.has(edge.node.id)) {
-              seen.add(edge.node.id);
-              productGids.push(edge.node.id);
-            }
+            addProductGid(edge.node.id);
           }
 
           hasNext = products.pageInfo.hasNextPage;
@@ -646,5 +655,69 @@ async function fetchFilteredProducts(
   }
 
   console.log(`[SyncEngine] Filter ${rule.filterType}: found ${productGids.length} products`);
+  return productGids;
+}
+
+function legacyCollectionIdFromGid(collectionGid: string): string | null {
+  return collectionGid.match(/gid:\/\/shopify\/Collection\/(\d+)/)?.[1] || null;
+}
+
+async function fetchProductGidsByCollectionId(
+  collectionGid: string,
+  sourceClient: any
+): Promise<string[]> {
+  const collectionId = legacyCollectionIdFromGid(collectionGid);
+  if (!collectionId) {
+    throw new Error(`Invalid Shopify collection ID: ${collectionGid}`);
+  }
+
+  const productGids: string[] = [];
+  let hasNext = true;
+  let cursor: string | null = null;
+
+  while (hasNext) {
+    const result: any = await sourceClient.queryWithRetry(
+      `#graphql
+      query GetProductsByCollectionId($query: String!, $first: Int!, $after: String) {
+        products(first: $first, after: $after, query: $query) {
+          edges {
+            node { id }
+          }
+          pageInfo {
+            hasNextPage
+            endCursor
+          }
+        }
+      }`,
+      { query: `collection_id:${collectionId}`, first: 50, after: cursor }
+    );
+
+    if (result.errors?.length) {
+      throw new Error(
+        `Failed to fetch products for collection ${collectionGid}: ${result.errors
+          .map((error: { message: string }) => error.message)
+          .join("; ")}`
+      );
+    }
+
+    const products = result.data?.products;
+    if (!products) {
+      console.warn(
+        `[SyncEngine] collection_id search returned no products connection for ${collectionGid}`
+      );
+      break;
+    }
+
+    for (const edge of products.edges) {
+      productGids.push(edge.node.id);
+    }
+
+    hasNext = products.pageInfo.hasNextPage;
+    cursor = products.pageInfo.endCursor;
+  }
+
+  console.log(
+    `[SyncEngine] collection_id fallback: ${productGids.length} products from ${collectionGid}`
+  );
   return productGids;
 }
