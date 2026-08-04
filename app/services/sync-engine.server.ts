@@ -555,7 +555,14 @@ async function fetchFilteredProducts(
             );
           }
 
-          const products = result.data?.collection?.products;
+          const collection = result.data?.collection;
+          if (!collection) {
+            throw new Error(
+              `Selected collection ${collectionGid} was not found on ${rule.sourceStore.shopDomain}. Re-select the collection from the source store.`
+            );
+          }
+
+          const products = collection.products;
           if (!products) {
             console.warn(
               `[SyncEngine] Collection ${collectionGid} returned no products connection on ${rule.sourceStore.shopDomain}`
