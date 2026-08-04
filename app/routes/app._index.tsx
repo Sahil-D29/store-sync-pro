@@ -1,5 +1,5 @@
 import type { LoaderFunctionArgs } from "@remix-run/node";
-import { useLoaderData } from "@remix-run/react";
+import { useLoaderData, useRouteError } from "@remix-run/react";
 import {
   Page,
   Layout,
@@ -12,13 +12,15 @@ import {
   InlineGrid,
   Link,
   Banner,
+  Button,
 } from "@shopify/polaris";
 import { TitleBar } from "@shopify/app-bridge-react";
-import { useRouteError } from "@remix-run/react";
-import { Button } from "@shopify/polaris";
 import { authenticate } from "../shopify.server";
 import prisma from "../db.server";
-import { getSubscription } from "../services/billing.server";
+import {
+  getSubscription,
+  syncSubscriptionFromShopify,
+} from "../services/billing.server";
 import { withDbRetry } from "../utils/db-retry.server";
 import { getAccountShop } from "../services/store-management.server";
 
@@ -33,16 +35,19 @@ const EMPTY_STATS = {
 };
 
 export const loader = async ({ request }: LoaderFunctionArgs) => {
-  const { session } = await authenticate.admin(request);
+  const { admin, session } = await authenticate.admin(request);
 
   try {
     const ownerShop = await withDbRetry(() => getAccountShop(session.shop));
+    const subscription =
+      ownerShop === session.shop
+        ? await syncSubscriptionFromShopify(admin, ownerShop)
+        : await withDbRetry(() => getSubscription(ownerShop));
     const dayAgo = new Date(Date.now() - 24 * 60 * 60 * 1000);
     const [
       connectedStores,
       activeSyncRules,
       recentLogs,
-      subscription,
       usage,
       successCount,
       errorCount,
@@ -56,7 +61,6 @@ export const loader = async ({ request }: LoaderFunctionArgs) => {
           take: 10,
           include: { syncRule: { select: { name: true } } },
         }),
-        getSubscription(ownerShop),
         prisma.usageTracker.findUnique({ where: { shopDomain: ownerShop } }),
         prisma.syncLog.count({ where: { syncRule: { ownerShop }, status: "SUCCESS", createdAt: { gte: dayAgo } } }),
         prisma.syncLog.count({ where: { syncRule: { ownerShop }, status: "FAILED", createdAt: { gte: dayAgo } } }),

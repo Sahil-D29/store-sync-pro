@@ -1,4 +1,4 @@
-import type { BillingPlan } from "@prisma/client";
+import type { BillingPlan, SubscriptionStatus } from "@prisma/client";
 import prisma from "../db.server";
 
 export const BILLING_PLANS = {
@@ -78,6 +78,9 @@ const GET_ACTIVE_SUBSCRIPTIONS_QUERY = `#graphql
         id
         name
         status
+        createdAt
+        currentPeriodEnd
+        trialDays
         lineItems {
           plan {
             pricingDetails {
@@ -96,6 +99,66 @@ const GET_ACTIVE_SUBSCRIPTIONS_QUERY = `#graphql
   }
 `;
 
+type ShopifyAdminClient = {
+  graphql: (q: string, options?: any) => Promise<Response>;
+};
+
+type LiveManagedSubscription = {
+  id: string;
+  name: string;
+  status: string;
+  createdAt: string;
+  currentPeriodEnd: string | null;
+  trialDays: number;
+};
+
+function productLimitForPlan(plan: BillingPlan): number {
+  return plan === "ENTERPRISE" ? 999999999 : BILLING_PLANS[plan].productLimit;
+}
+
+function planFromShopifyName(name: string | null | undefined): BillingPlan | null {
+  const normalized = (name || "").toLowerCase();
+
+  if (normalized.includes("enterprise")) return "ENTERPRISE";
+  if (normalized.includes("basic")) return "BASIC";
+  if (normalized.includes("pro")) return "PRO";
+
+  return null;
+}
+
+function calculateTrialEndsAt(subscription: LiveManagedSubscription): Date | null {
+  if (!subscription.trialDays || subscription.trialDays <= 0) return null;
+
+  const createdAt = new Date(subscription.createdAt);
+  if (Number.isNaN(createdAt.getTime())) return null;
+
+  return new Date(
+    createdAt.getTime() + subscription.trialDays * 24 * 60 * 60 * 1000
+  );
+}
+
+function statusFromShopifySubscription(
+  subscription: LiveManagedSubscription,
+  trialEndsAt: Date | null
+): SubscriptionStatus {
+  if (subscription.status === "FROZEN") return "FROZEN";
+  if (["CANCELLED", "DECLINED", "EXPIRED"].includes(subscription.status)) {
+    return "CANCELLED";
+  }
+
+  if (trialEndsAt && trialEndsAt.getTime() > Date.now()) {
+    return "TRIAL";
+  }
+
+  return "ACTIVE";
+}
+
+function parseDate(value: string | null): Date | null {
+  if (!value) return null;
+  const date = new Date(value);
+  return Number.isNaN(date.getTime()) ? null : date;
+}
+
 /**
  * Read the live managed-pricing subscription from Shopify (source of truth).
  * Returns the active subscription's name + status, or null when the merchant is
@@ -104,7 +167,7 @@ const GET_ACTIVE_SUBSCRIPTIONS_QUERY = `#graphql
  * pricing page (req 1.2.2). Read-only and best-effort — never throws.
  */
 export async function getLiveManagedPlan(
-  admin: { graphql: (q: string) => Promise<Response> }
+  admin: ShopifyAdminClient
 ): Promise<{ name: string; status: string } | null> {
   try {
     const response = await admin.graphql(GET_ACTIVE_SUBSCRIPTIONS_QUERY);
@@ -117,6 +180,93 @@ export async function getLiveManagedPlan(
   } catch (e) {
     console.warn("[Billing] getLiveManagedPlan failed:", (e as Error).message);
     return null;
+  }
+}
+
+/**
+ * Reconcile local subscription state with Shopify's managed-pricing source of
+ * truth. Shopify query failures are non-destructive: the existing local record
+ * is returned unchanged and never downgraded.
+ */
+export async function syncSubscriptionFromShopify(
+  admin: ShopifyAdminClient,
+  shopDomain: string
+) {
+  try {
+    const response = await admin.graphql(GET_ACTIVE_SUBSCRIPTIONS_QUERY);
+    if (!response.ok) {
+      throw new Error(`Shopify billing query failed with ${response.status}`);
+    }
+
+    const result = await response.json();
+    if (result?.errors?.length) {
+      throw new Error(
+        result.errors.map((error: { message?: string }) => error.message).join("; ")
+      );
+    }
+
+    const subs = result?.data?.currentAppInstallation?.activeSubscriptions;
+
+    if (!Array.isArray(subs) || subs.length === 0) {
+      return prisma.subscription.upsert({
+        where: { shopDomain },
+        update: {
+          plan: "FREE",
+          productLimit: BILLING_PLANS.FREE.productLimit,
+          shopifyChargeGid: null,
+          status: "ACTIVE",
+          trialEndsAt: null,
+          currentPeriodEnd: null,
+        },
+        create: {
+          shopDomain,
+          plan: "FREE",
+          productLimit: BILLING_PLANS.FREE.productLimit,
+          status: "ACTIVE",
+        },
+      });
+    }
+
+    const liveSubscription = subs[0] as LiveManagedSubscription;
+    const plan = planFromShopifyName(liveSubscription.name);
+
+    if (!plan) {
+      console.warn(
+        `[Billing] Unknown Shopify managed plan "${liveSubscription.name}" for ${shopDomain}; keeping local subscription.`
+      );
+      return getSubscription(shopDomain);
+    }
+
+    const trialEndsAt = calculateTrialEndsAt(liveSubscription);
+    const status = statusFromShopifySubscription(liveSubscription, trialEndsAt);
+    const currentPeriodEnd = parseDate(liveSubscription.currentPeriodEnd);
+
+    return prisma.subscription.upsert({
+      where: { shopDomain },
+      update: {
+        plan,
+        productLimit: productLimitForPlan(plan),
+        shopifyChargeGid: liveSubscription.id,
+        status,
+        trialEndsAt,
+        currentPeriodEnd,
+      },
+      create: {
+        shopDomain,
+        plan,
+        productLimit: productLimitForPlan(plan),
+        shopifyChargeGid: liveSubscription.id,
+        status,
+        trialEndsAt,
+        currentPeriodEnd,
+      },
+    });
+  } catch (e) {
+    console.warn(
+      "[Billing] syncSubscriptionFromShopify failed; keeping local subscription:",
+      (e as Error).message
+    );
+    return getSubscription(shopDomain);
   }
 }
 
@@ -206,10 +356,7 @@ export async function createBillingSubscription(
       where: { shopDomain },
       update: {
         plan,
-        productLimit:
-          plan === "ENTERPRISE"
-            ? 999999999
-            : BILLING_PLANS[plan].productLimit,
+        productLimit: productLimitForPlan(plan),
         shopifyChargeGid: data.appSubscription.id,
         status:
           planConfig.trialDays > 0 ? "TRIAL" : "ACTIVE",
@@ -223,10 +370,7 @@ export async function createBillingSubscription(
       create: {
         shopDomain,
         plan,
-        productLimit:
-          plan === "ENTERPRISE"
-            ? 999999999
-            : BILLING_PLANS[plan].productLimit,
+        productLimit: productLimitForPlan(plan),
         shopifyChargeGid: data.appSubscription.id,
         status:
           planConfig.trialDays > 0 ? "TRIAL" : "ACTIVE",

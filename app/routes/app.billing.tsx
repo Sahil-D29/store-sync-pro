@@ -1,9 +1,8 @@
 import type { ActionFunctionArgs, LoaderFunctionArgs } from "@remix-run/node";
 import { json, redirect } from "@remix-run/node";
-import { useLoaderData, useNavigation, useActionData, useRouteError } from "@remix-run/react";
+import { useLoaderData, useActionData, useRouteError } from "@remix-run/react";
 import {
   Page,
-  Layout,
   Card,
   BlockStack,
   Text,
@@ -11,7 +10,6 @@ import {
   Badge,
   Button,
   InlineGrid,
-  Box,
   Divider,
   ProgressBar,
   Banner,
@@ -19,9 +17,8 @@ import {
 import { TitleBar } from "@shopify/app-bridge-react";
 import { authenticate } from "../shopify.server";
 import {
-  getSubscription,
   createBillingSubscription,
-  getLiveManagedPlan,
+  syncSubscriptionFromShopify,
   BILLING_PLANS,
 } from "../services/billing.server";
 import prisma from "../db.server";
@@ -47,27 +44,18 @@ export const loader = async ({ request }: LoaderFunctionArgs) => {
   const managedPricingUrl = `https://admin.shopify.com/store/${shopHandle}/charges/${appHandle}/pricing_plans`;
 
   try {
-    const [subscription, usage] = await withDbRetry(() =>
-      Promise.all([
-        getSubscription(shopDomain),
-        prisma.usageTracker.findUnique({ where: { shopDomain } }),
-      ])
+    const subscription = await syncSubscriptionFromShopify(admin, shopDomain);
+    const usage = await withDbRetry(() =>
+      prisma.usageTracker.findUnique({ where: { shopDomain } })
     );
-
-    // Reconcile with Shopify's live managed subscription (source of truth) so the
-    // displayed plan stays correct after a reinstall or a plan change made on
-    // Shopify's hosted pricing page (req 1.2.2).
-    const livePlan = await getLiveManagedPlan(admin);
     const planName =
-      livePlan?.name ||
       BILLING_PLANS[subscription.plan as keyof typeof BILLING_PLANS]?.name ||
       subscription.plan;
-    const status = livePlan?.status || subscription.status;
 
     return json({
       subscription: {
         plan: subscription.plan,
-        status,
+        status: subscription.status,
         productLimit: subscription.productLimit,
         trialEndsAt: subscription.trialEndsAt?.toISOString() || null,
         planName,
@@ -142,8 +130,6 @@ export const action = async ({ request }: ActionFunctionArgs) => {
 export default function BillingPage() {
   const { subscription, usage, plans, loadError, managedPricingUrl } = useLoaderData<typeof loader>();
   const actionData = useActionData<{ error?: string; success?: boolean; message?: string }>();
-  const navigation = useNavigation();
-  const isSubmitting = navigation.state === "submitting";
 
   const currentPlan = subscription.plan;
   const usagePercent =

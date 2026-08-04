@@ -1,4 +1,5 @@
 import prisma from "../db.server";
+import { BILLING_PLANS, getSubscription } from "./billing.server";
 import { createLogger } from "../utils/logger.server";
 
 const log = createLogger("UsageTracker");
@@ -65,26 +66,22 @@ export async function canSyncProduct(shopDomain: string): Promise<{
   plan: string;
 }> {
   const [subscription, tracker] = await Promise.all([
-    prisma.subscription.findUnique({ where: { shopDomain } }),
+    getSubscription(shopDomain),
     prisma.usageTracker.findUnique({ where: { shopDomain } }),
   ]);
 
-  const plan = subscription?.plan || "FREE";
+  const plan = subscription.plan;
   const current = tracker?.syncedProductCount ?? 0;
-
-  const limits: Record<string, number> = {
-    FREE: 100,
-    BASIC: 500,
-    PRO: 5000,
-    ENTERPRISE: Infinity,
-  };
-
-  const limit = limits[plan] ?? 100;
+  const planLimit =
+    BILLING_PLANS[plan].productLimit === Infinity
+      ? 999999999
+      : BILLING_PLANS[plan].productLimit;
+  const limit = subscription.productLimit || planLimit;
 
   return {
     allowed: current < limit,
     current,
-    limit: limit === Infinity ? -1 : limit, // -1 = unlimited
+    limit: limit >= 999999999 ? -1 : limit, // -1 = unlimited
     plan,
   };
 }
