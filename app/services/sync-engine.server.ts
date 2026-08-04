@@ -533,7 +533,7 @@ async function fetchFilteredProducts(
             `#graphql
             query GetCollectionProducts($id: ID!, $first: Int!, $after: String) {
               collection(id: $id) {
-                products(first: 50, after: $after) {
+                products(first: $first, after: $after) {
                   edges {
                     node { id }
                   }
@@ -547,8 +547,21 @@ async function fetchFilteredProducts(
             { id: collectionGid, first: 50, after: cursor }
           );
 
+          if (result.errors?.length) {
+            throw new Error(
+              `Failed to fetch collection products for ${collectionGid}: ${result.errors
+                .map((error: { message: string }) => error.message)
+                .join("; ")}`
+            );
+          }
+
           const products = result.data?.collection?.products;
-          if (!products) break;
+          if (!products) {
+            console.warn(
+              `[SyncEngine] Collection ${collectionGid} returned no products connection on ${rule.sourceStore.shopDomain}`
+            );
+            break;
+          }
 
           for (const edge of products.edges) {
             if (!seen.has(edge.node.id)) {
@@ -592,6 +605,14 @@ async function fetchFilteredProducts(
       }`,
       { after: cursor }
     );
+
+    if (result.errors?.length) {
+      throw new Error(
+        `Failed to fetch products: ${result.errors
+          .map((error: { message: string }) => error.message)
+          .join("; ")}`
+      );
+    }
 
     const products: any = result.data?.products;
     if (!products) {
