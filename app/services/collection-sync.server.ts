@@ -30,6 +30,21 @@ type CollectionMappingWithStores = CollectionMapping & {
   destStore: ConnectedStore;
 };
 
+type SourceCollectionData = {
+  id: string;
+  title: string;
+  handle: string;
+  descriptionHtml: string | null;
+  sortOrder: string | null;
+  templateSuffix: string | null;
+  image: { url: string; altText: string | null } | null;
+  seo: { title: string | null; description: string | null } | null;
+  ruleSet: {
+    appliedDisjunctively: boolean;
+    rules: Array<{ column: string; relation: string; condition: string }>;
+  } | null;
+};
+
 interface SyncCollectionResult {
   success: boolean;
   action: "CREATE" | "UPDATE" | "DELETE" | "SKIP";
@@ -37,6 +52,107 @@ interface SyncCollectionResult {
   destGid?: string;
   error?: string;
   duration: number;
+}
+
+const COLLECTION_FIELDS = `#graphql
+  fragment CollectionFields on Collection {
+    id
+    title
+    handle
+    descriptionHtml
+    sortOrder
+    templateSuffix
+    image {
+      url
+      altText
+    }
+    seo {
+      title
+      description
+    }
+    ruleSet {
+      appliedDisjunctively
+      rules {
+        column
+        relation
+        condition
+      }
+    }
+  }
+`;
+
+function legacyCollectionIdFromGid(collectionGid: string): string | null {
+  return collectionGid.match(/gid:\/\/shopify\/Collection\/(\d+)/)?.[1] || null;
+}
+
+async function fetchSourceCollectionData(
+  mapping: CollectionMappingWithStores,
+  sourceClient: ShopifyGraphQLClient
+): Promise<SourceCollectionData> {
+  const byIdResult: any = await sourceClient.queryWithRetry(
+    `${COLLECTION_FIELDS}
+    query GetCollection($id: ID!) {
+      collection(id: $id) {
+        ...CollectionFields
+      }
+    }`,
+    { id: mapping.sourceCollectionGid }
+  );
+
+  if (byIdResult.errors?.length) {
+    throw new Error(
+      `Failed to fetch collection ${mapping.sourceCollectionGid}: ${byIdResult.errors
+        .map((error: { message: string }) => error.message)
+        .join("; ")}`
+    );
+  }
+
+  if (byIdResult.data?.collection) {
+    return byIdResult.data.collection;
+  }
+
+  const fallbackQueries = [
+    mapping.sourceHandle ? `handle:${mapping.sourceHandle}` : null,
+    legacyCollectionIdFromGid(mapping.sourceCollectionGid)
+      ? `id:${legacyCollectionIdFromGid(mapping.sourceCollectionGid)}`
+      : null,
+  ].filter(Boolean) as string[];
+
+  for (const query of fallbackQueries) {
+    const bySearchResult: any = await sourceClient.queryWithRetry(
+      `${COLLECTION_FIELDS}
+      query FindCollection($query: String!) {
+        collections(first: 1, query: $query) {
+          edges {
+            node {
+              ...CollectionFields
+            }
+          }
+        }
+      }`,
+      { query }
+    );
+
+    if (bySearchResult.errors?.length) {
+      throw new Error(
+        `Failed to search collection ${mapping.sourceCollectionGid}: ${bySearchResult.errors
+          .map((error: { message: string }) => error.message)
+          .join("; ")}`
+      );
+    }
+
+    const collection = bySearchResult.data?.collections?.edges?.[0]?.node;
+    if (collection) {
+      console.warn(
+        `[CollectionSync] Collection ${mapping.sourceCollectionGid} was not visible via collection(id:) on ${mapping.sourceStore.shopDomain}; using collections search "${query}"`
+      );
+      return collection;
+    }
+  }
+
+  throw new Error(
+    `Collection ${mapping.sourceCollectionGid} was not found on ${mapping.sourceStore.shopDomain}`
+  );
 }
 
 /**
@@ -51,49 +167,10 @@ export async function syncCollection(
   const sourceCollectionGid = mapping.sourceCollectionGid;
 
   try {
-    // Fetch collection data from source
-    const sourceResult = await sourceClient.queryWithRetry(
-      `#graphql
-      query GetCollection($id: ID!) {
-        collection(id: $id) {
-          id
-          title
-          handle
-          descriptionHtml
-          sortOrder
-          templateSuffix
-          image {
-            url
-            altText
-          }
-          seo {
-            title
-            description
-          }
-          ruleSet {
-            appliedDisjunctively
-            rules {
-              column
-              relation
-              condition
-            }
-          }
-        }
-      }`,
-      { id: sourceCollectionGid }
+    const sourceCollection = await fetchSourceCollectionData(
+      mapping,
+      sourceClient
     );
-
-    if (sourceResult.errors?.length || !sourceResult.data?.collection) {
-      return {
-        success: false,
-        action: "SKIP",
-        sourceGid: sourceCollectionGid,
-        error: sourceResult.errors?.[0]?.message || "Collection not found",
-        duration: Date.now() - startTime,
-      };
-    }
-
-    const sourceCollection = sourceResult.data.collection;
     const isNew = !mapping.destCollectionGid;
 
     // Build collection input
@@ -598,7 +675,23 @@ async function fetchCollectionProductGids(
       after: cursor,
     });
 
-    const products = result.data?.collection?.products;
+    if (result.errors?.length) {
+      throw new Error(
+        `Failed to fetch collection products for ${collectionGid}: ${result.errors
+          .map((error: { message: string }) => error.message)
+          .join("; ")}`
+      );
+    }
+
+    const collection = result.data?.collection;
+    if (!collection) {
+      console.warn(
+        `[CollectionSync] Collection ${collectionGid} is not visible via collection(id:); falling back to products collection_id search`
+      );
+      return fetchProductGidsByCollectionId(client, collectionGid);
+    }
+
+    const products = collection.products;
     if (!products) break;
 
     for (const edge of products.edges) {
@@ -609,6 +702,61 @@ async function fetchCollectionProductGids(
     cursor = products.pageInfo.endCursor;
   }
 
+  return gids;
+}
+
+async function fetchProductGidsByCollectionId(
+  client: ShopifyGraphQLClient,
+  collectionGid: string
+): Promise<string[]> {
+  const collectionId = legacyCollectionIdFromGid(collectionGid);
+  if (!collectionId) {
+    throw new Error(`Invalid Shopify collection ID: ${collectionGid}`);
+  }
+
+  const gids: string[] = [];
+  let hasNext = true;
+  let cursor: string | null = null;
+
+  while (hasNext) {
+    const result: any = await client.queryWithRetry(
+      `#graphql
+      query GetProductsByCollectionId($query: String!, $first: Int!, $after: String) {
+        products(first: $first, after: $after, query: $query) {
+          edges {
+            node { id }
+          }
+          pageInfo {
+            hasNextPage
+            endCursor
+          }
+        }
+      }`,
+      { query: `collection_id:${collectionId}`, first: 100, after: cursor }
+    );
+
+    if (result.errors?.length) {
+      throw new Error(
+        `Failed to fetch products for collection ${collectionGid}: ${result.errors
+          .map((error: { message: string }) => error.message)
+          .join("; ")}`
+      );
+    }
+
+    const products = result.data?.products;
+    if (!products) break;
+
+    for (const edge of products.edges) {
+      gids.push(edge.node.id);
+    }
+
+    hasNext = products.pageInfo.hasNextPage;
+    cursor = products.pageInfo.endCursor;
+  }
+
+  console.log(
+    `[CollectionSync] collection_id fallback: ${gids.length} products from ${collectionGid}`
+  );
   return gids;
 }
 
