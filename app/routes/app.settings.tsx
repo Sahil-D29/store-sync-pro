@@ -3,7 +3,6 @@ import { json } from "@remix-run/node";
 import { useLoaderData, useSubmit, useNavigation } from "@remix-run/react";
 import {
   Page,
-  Layout,
   Card,
   BlockStack,
   Text,
@@ -11,10 +10,7 @@ import {
   Badge,
   Box,
   Button,
-  Banner,
-  Divider,
   IndexTable,
-  ProgressBar,
 } from "@shopify/polaris";
 import { TitleBar } from "@shopify/app-bridge-react";
 import { authenticate } from "../shopify.server";
@@ -39,7 +35,7 @@ export const loader = async ({ request }: LoaderFunctionArgs) => {
 
   return json({
     appVersion: "1.0.0",
-    apiVersion: "2025-01",
+    apiVersion: "2026-04",
     retryStats,
     exchangeRates: exchangeRates.map((r) => ({
       ...r,

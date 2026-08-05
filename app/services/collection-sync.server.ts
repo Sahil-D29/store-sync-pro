@@ -268,6 +268,31 @@ async function fetchSourceCollectionData(
     return byIdResult.data.collection;
   }
 
+  const byIdentifierIdResult: any = await sourceClient.queryWithRetry(
+    `${COLLECTION_FIELDS}
+    query GetCollectionByIdentifierId($identifier: CollectionIdentifierInput!) {
+      collectionByIdentifier(identifier: $identifier) {
+        ...CollectionFields
+      }
+    }`,
+    { identifier: { id: mapping.sourceCollectionGid } }
+  );
+
+  if (byIdentifierIdResult.data?.collectionByIdentifier) {
+    console.warn(
+      `[CollectionSync] Collection ${mapping.sourceCollectionGid} was not visible via collection(id:) on ${mapping.sourceStore.shopDomain}; using collectionByIdentifier(id)`
+    );
+    return byIdentifierIdResult.data.collectionByIdentifier;
+  }
+
+  if (byIdentifierIdResult.errors?.length) {
+    lookupErrors.push(
+      `identifier id lookup: ${byIdentifierIdResult.errors
+        .map((error: { message: string }) => error.message)
+        .join("; ")}`
+    );
+  }
+
   if (mapping.sourceHandle) {
     const byIdentifierResult: any = await sourceClient.queryWithRetry(
       `${COLLECTION_FIELDS}

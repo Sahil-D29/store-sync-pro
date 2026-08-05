@@ -16,7 +16,7 @@ redirect_urls = [
 scopes = "write_products,read_products,write_inventory,read_inventory"
 
 [webhooks]
-api_version = "2025-01"
+api_version = "2026-04"
 
   [[webhooks.subscriptions]]
   uri = "/webhooks/app/uninstalled"

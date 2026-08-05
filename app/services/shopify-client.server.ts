@@ -1,7 +1,7 @@
 import prisma from "../db.server";
 import { decrypt } from "../utils/encryption.server";
 
-const API_VERSION = "2025-01";
+const API_VERSION = "2026-04";
 
 interface GraphQLResponse<T = any> {
   data?: T;
