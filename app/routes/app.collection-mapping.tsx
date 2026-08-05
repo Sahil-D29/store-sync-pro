@@ -26,6 +26,7 @@ import prisma from "../db.server";
 import { withDbRetry } from "../utils/db-retry.server";
 import { getAccountShop } from "../services/store-management.server";
 import { triggerManualCollectionSync } from "../services/collection-sync.server";
+import { createClientForStore } from "../services/shopify-client.server";
 
 const MISSING_PRODUCT_OPTIONS = [
   { label: "Skip it", value: "SKIP" },
@@ -255,8 +256,12 @@ export const loader = async ({ request }: LoaderFunctionArgs) => {
 
   try {
     const ownerShop = await withDbRetry(() => getAccountShop(session.shop));
-    const [mappings, destStores, priceRules] = await withDbRetry(() =>
+    const [sourceStore, mappings, destStores, priceRules] = await withDbRetry(() =>
       Promise.all([
+        prisma.connectedStore.findFirst({
+          where: { shopDomain: ownerShop, ownerShop, status: "ACTIVE" },
+          select: { id: true, shopDomain: true, shopName: true },
+        }),
         prisma.collectionMapping.findMany({
           where: { sourceStore: { ownerShop } },
           include: {
@@ -281,6 +286,7 @@ export const loader = async ({ request }: LoaderFunctionArgs) => {
     );
 
     return json({
+      sourceStore,
       mappings: mappings.map((m) => ({
         ...m,
         lastSyncedAt: m.lastSyncedAt?.toISOString(),
@@ -294,6 +300,7 @@ export const loader = async ({ request }: LoaderFunctionArgs) => {
   } catch (e) {
     console.error("[CollectionMapping] Loader DB error:", (e as Error).message);
     return json({
+      sourceStore: null,
       mappings: [],
       destStores: [],
       priceRules: [],
@@ -323,7 +330,7 @@ export const action = async ({ request }: ActionFunctionArgs) => {
   switch (intent) {
     case "create-mapping": {
       const sourceCollectionGid = formData.get("sourceCollectionGid") as string;
-      const sourceHandle = (formData.get("sourceHandle") as string) || "";
+      let sourceHandle = (formData.get("sourceHandle") as string) || "";
       const missingProductAction = parseMissingProductAction(formData.get("missingProductAction"));
       const triggerMode = parseTriggerMode(formData.get("triggerMode"));
 
@@ -353,13 +360,35 @@ export const action = async ({ request }: ActionFunctionArgs) => {
       }
 
       const ownerShop = await getAccountShop(session.shop);
-      const sourceStore = await prisma.connectedStore.findUnique({
-        where: { shopDomain: session.shop },
+      const sourceStore = await prisma.connectedStore.findFirst({
+        where: { shopDomain: ownerShop, ownerShop, status: "ACTIVE" },
         select: { id: true },
       });
       if (!sourceStore) {
         return json({ error: "Source store not found" }, { status: 404 });
       }
+
+      const sourceClient = await createClientForStore(sourceStore.id);
+      const sourceCollectionResult: any = await sourceClient.queryWithRetry(
+        `#graphql
+        query ValidateSourceCollection($id: ID!) {
+          collection(id: $id) {
+            id
+            title
+            handle
+          }
+        }`,
+        { id: sourceCollectionGid }
+      );
+      if (sourceCollectionResult.errors?.length || !sourceCollectionResult.data?.collection) {
+        return json(
+          {
+            error: `Selected source collection was not found on ${ownerShop}. Choose it from the source collection list again.`,
+          },
+          { status: 400 }
+        );
+      }
+      sourceHandle = sourceCollectionResult.data.collection.handle || sourceHandle;
 
       const validDestStores = await prisma.connectedStore.findMany({
         where: { id: { in: destinations.map((d) => d.destStoreId) }, ownerShop },
@@ -395,6 +424,7 @@ export const action = async ({ request }: ActionFunctionArgs) => {
             },
           },
           update: {
+            sourceHandle,
             destCollectionGid,
             ...shared,
           },
@@ -461,9 +491,10 @@ export const action = async ({ request }: ActionFunctionArgs) => {
 };
 
 export default function CollectionMappingPage() {
-  const { mappings, destStores, priceRules, loadError } = useLoaderData<typeof loader>();
+  const { sourceStore, mappings, destStores, priceRules, loadError } = useLoaderData<typeof loader>();
   const submit = useSubmit();
   const syncFetcher = useFetcher<{ success?: boolean; jobId?: string; queued?: number; error?: string }>();
+  const sourceCollectionsFetcher = useFetcher<{ collections: Array<{ id: string; title: string; handle: string }>; error?: string }>();
   const navigation = useNavigation();
   const isSubmitting = navigation.state === "submitting";
   const [syncJobs, setSyncJobs] = useState<Record<string, SyncJobView>>({});
@@ -489,6 +520,7 @@ export default function CollectionMappingPage() {
   };
 
   const [sourceCollection, setSourceCollection] = useState<{ id: string; title: string; handle: string } | null>(null);
+  const [sourceQuery, setSourceQuery] = useState("");
   const [missingProductAction, setMissingProductAction] = useState("SKIP");
   const [triggerMode, setTriggerMode] = useState("REALTIME");
 
@@ -497,24 +529,26 @@ export default function CollectionMappingPage() {
     ([, s]) => s.destMode === "existing" && !s.destCollection
   );
 
-  const openSourceCollectionPicker = useCallback(async () => {
-    try {
-      const selected = await (window as any).shopify.resourcePicker({
-        type: "collection",
-        action: "select",
-        multiple: false,
-      });
-      if (selected?.length) {
-        setSourceCollection({
-          id: selected[0].id,
-          title: selected[0].title,
-          handle: selected[0].handle,
-        });
-      }
-    } catch (e) {
-      console.error("Collection picker error:", e);
+  useEffect(() => {
+    if (sourceStore?.id) {
+      sourceCollectionsFetcher.load(`/api/store-collections/${sourceStore.id}`);
     }
-  }, []);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [sourceStore?.id]);
+
+  const sourceCollectionOptions = useMemo(() => {
+    const all = sourceCollectionsFetcher.data?.collections || [];
+    const query = sourceQuery.toLowerCase();
+    const filtered = query
+      ? all.filter((collection) =>
+          `${collection.title} ${collection.handle}`.toLowerCase().includes(query)
+        )
+      : all;
+    return filtered.slice(0, 50).map((collection) => ({
+      value: collection.id,
+      label: collection.title,
+    }));
+  }, [sourceCollectionsFetcher.data, sourceQuery]);
 
   const handleCreateMapping = () => {
     if (!chosenEntries.length || !sourceCollection || hasIncompleteExisting) return;
@@ -544,6 +578,7 @@ export default function CollectionMappingPage() {
     submit(fd, { method: "POST" });
 
     setSourceCollection(null);
+    setSourceQuery("");
     setMissingProductAction("SKIP");
     setTriggerMode("REALTIME");
     setDestSelections((prev) => {
@@ -738,14 +773,41 @@ export default function CollectionMappingPage() {
                 <Text as="p" variant="bodyMd" fontWeight="medium">
                   Source collection
                 </Text>
-                <InlineStack gap="200" blockAlign="center">
-                  <Button onClick={openSourceCollectionPicker}>
-                    {sourceCollection ? "Change collection" : "Choose collection"}
-                  </Button>
-                  {sourceCollection && (
-                    <Badge tone="info">{sourceCollection.title}</Badge>
-                  )}
-                </InlineStack>
+                <Autocomplete
+                  options={sourceCollectionOptions}
+                  selected={sourceCollection ? [sourceCollection.id] : []}
+                  onSelect={(selected) => {
+                    const id = selected[0];
+                    const match = sourceCollectionsFetcher.data?.collections.find((collection) => collection.id === id);
+                    if (match) {
+                      setSourceCollection(match);
+                      setSourceQuery(match.title);
+                    }
+                  }}
+                  loading={sourceCollectionsFetcher.state === "loading"}
+                  textField={
+                    <Autocomplete.TextField
+                      label=""
+                      labelHidden
+                      value={sourceCollection ? sourceCollection.title : sourceQuery}
+                      onChange={(value) => {
+                        setSourceQuery(value);
+                        if (sourceCollection) setSourceCollection(null);
+                      }}
+                      placeholder={
+                        sourceStore
+                          ? `Search ${sourceStore.shopName || sourceStore.shopDomain} collections`
+                          : "Source store not connected"
+                      }
+                      autoComplete="off"
+                    />
+                  }
+                />
+                {sourceCollectionsFetcher.data?.error && (
+                  <Text as="p" variant="bodySm" tone="critical">
+                    {sourceCollectionsFetcher.data.error}
+                  </Text>
+                )}
               </BlockStack>
 
               <Select
