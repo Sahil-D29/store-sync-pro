@@ -195,9 +195,16 @@ const syncInventoryWorker = new Worker(
 
     if (!rule || !rule.isActive) return;
 
+    const sourceClient = await createClientForStore(rule.sourceStoreId);
     const destClient = await createClientForStore(rule.destStoreId);
 
-    const result = await syncInventoryItem(rule, inventoryItemId, available, destClient);
+    const result = await syncInventoryItem(
+      rule,
+      inventoryItemId,
+      available,
+      sourceClient,
+      destClient
+    );
 
     await prisma.syncLog.create({
       data: {

@@ -151,6 +151,21 @@ export const INVENTORY_SET_QUANTITIES_MUTATION = `#graphql
   }
 `;
 
+export const INVENTORY_ITEM_UPDATE_MUTATION = `#graphql
+  mutation InventoryItemUpdate($id: ID!, $input: InventoryItemInput!) {
+    inventoryItemUpdate(id: $id, input: $input) {
+      inventoryItem {
+        id
+        tracked
+      }
+      userErrors {
+        field
+        message
+      }
+    }
+  }
+`;
+
 export const METAFIELDS_SET_MUTATION = `#graphql
   mutation MetafieldsSet($metafields: [MetafieldsSetInput!]!) {
     metafieldsSet(metafields: $metafields) {

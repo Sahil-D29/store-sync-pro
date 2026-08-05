@@ -1,9 +1,9 @@
 import prisma from "../db.server";
-import { ShopifyGraphQLClient } from "./shopify-client.server";
-import { GET_INVENTORY_LEVELS } from "../graphql/queries";
+import type { ShopifyGraphQLClient } from "./shopify-client.server";
 import {
-  INVENTORY_SET_QUANTITIES_MUTATION,
   INVENTORY_ACTIVATE_MUTATION,
+  INVENTORY_ITEM_UPDATE_MUTATION,
+  INVENTORY_SET_QUANTITIES_MUTATION,
 } from "../graphql/mutations";
 import type { SyncRuleWithRelations } from "./product-sync.server";
 
@@ -15,8 +15,138 @@ interface SyncInventoryResult {
   duration: number;
 }
 
+function parseVariantMappings(value: string | null | undefined): Array<{
+  sourceVariantGid: string;
+  destVariantGid: string;
+  sourceSku: string;
+}> {
+  if (!value) return [];
+  try {
+    return JSON.parse(value);
+  } catch {
+    return [];
+  }
+}
+
+function availableQuantityFromLevels(
+  levels: Array<{
+    node?: { quantities?: Array<{ name: string; quantity: number }> };
+  }>
+) {
+  return levels.reduce((sum, edge) => {
+    const quantity =
+      edge.node?.quantities?.find((q) => q.name === "available")?.quantity ?? 0;
+    return sum + quantity;
+  }, 0);
+}
+
+async function getPrimaryLocationId(
+  client: ShopifyGraphQLClient
+): Promise<string | null> {
+  const result = await client.queryWithRetry(
+    `#graphql
+    query {
+      locations(first: 1) {
+        edges {
+          node {
+            id
+          }
+        }
+      }
+    }`
+  );
+
+  return result.data?.locations?.edges?.[0]?.node?.id || null;
+}
+
+async function ensureInventoryTracked(
+  destClient: ShopifyGraphQLClient,
+  inventoryItemId: string,
+  tracked: boolean
+): Promise<string | null> {
+  if (tracked) return null;
+
+  const result = await destClient.queryWithRetry(INVENTORY_ITEM_UPDATE_MUTATION, {
+    id: inventoryItemId,
+    input: { tracked: true },
+  });
+  const errors = result.data?.inventoryItemUpdate?.userErrors;
+  return errors?.length ? errors[0].message : null;
+}
+
+async function setDestinationInventoryQuantity(
+  destClient: ShopifyGraphQLClient,
+  destVariantGid: string,
+  quantity: number
+): Promise<string | null> {
+  const destLocationId = await getPrimaryLocationId(destClient);
+  if (!destLocationId) return "No destination location found";
+
+  const destVariantResult = await destClient.queryWithRetry(
+    `#graphql
+    query GetVariantInventory($id: ID!, $locationId: ID!) {
+      productVariant(id: $id) {
+        inventoryItem {
+          id
+          tracked
+          inventoryLevel(locationId: $locationId) {
+            id
+          }
+        }
+      }
+    }`,
+    { id: destVariantGid, locationId: destLocationId }
+  );
+
+  const destInventoryItem =
+    destVariantResult.data?.productVariant?.inventoryItem;
+  const destInventoryItemId = destInventoryItem?.id;
+  if (!destInventoryItemId) return "Destination inventory item not found";
+
+  const trackingError = await ensureInventoryTracked(
+    destClient,
+    destInventoryItemId,
+    !!destInventoryItem.tracked
+  );
+  if (trackingError) return trackingError;
+
+  if (!destInventoryItem.inventoryLevel) {
+    const activateResult = await destClient.queryWithRetry(
+      INVENTORY_ACTIVATE_MUTATION,
+      {
+        inventoryItemId: destInventoryItemId,
+        locationId: destLocationId,
+        available: quantity,
+      }
+    );
+    const errors = activateResult.data?.inventoryActivate?.userErrors;
+    return errors?.length ? errors[0].message : null;
+  }
+
+  const setResult = await destClient.queryWithRetry(
+    INVENTORY_SET_QUANTITIES_MUTATION,
+    {
+      input: {
+        reason: "correction",
+        name: "available",
+        ignoreCompareQuantity: true,
+        quantities: [
+          {
+            inventoryItemId: destInventoryItemId,
+            locationId: destLocationId,
+            quantity,
+          },
+        ],
+      },
+    }
+  );
+
+  const errors = setResult.data?.inventorySetQuantities?.userErrors;
+  return errors?.length ? errors[0].message : null;
+}
+
 /**
- * Sync inventory for a product's variants from source to destination
+ * Sync inventory for a product's variants from source to destination.
  */
 export async function syncProductInventory(
   syncRule: SyncRuleWithRelations,
@@ -26,7 +156,6 @@ export async function syncProductInventory(
 ): Promise<SyncInventoryResult[]> {
   const results: SyncInventoryResult[] = [];
 
-  // Get variant mappings
   const mapping = await prisma.productMapping.findUnique({
     where: {
       sourceStoreId_destStoreId_sourceProductGid: {
@@ -49,13 +178,7 @@ export async function syncProductInventory(
     ];
   }
 
-  const variantMappings: Array<{
-    sourceVariantGid: string;
-    destVariantGid: string;
-    sourceSku: string;
-  }> = JSON.parse(mapping.variantMappings);
-
-  // Fetch source product variants with inventory
+  const variantMappings = parseVariantMappings(mapping.variantMappings);
   const sourceResult = await sourceClient.queryWithRetry(
     `#graphql
     query GetProductInventory($id: ID!) {
@@ -64,17 +187,16 @@ export async function syncProductInventory(
           edges {
             node {
               id
+              inventoryQuantity
               inventoryItem {
                 id
-                inventoryLevels(first: 5) {
+                tracked
+                inventoryLevels(first: 50) {
                   edges {
                     node {
                       quantities(names: ["available"]) {
                         name
                         quantity
-                      }
-                      location {
-                        id
                       }
                     }
                   }
@@ -90,154 +212,42 @@ export async function syncProductInventory(
 
   if (!sourceResult.data?.product) return results;
 
-  // Get destination locations (use first location)
-  const destLocationsResult = await destClient.queryWithRetry(
-    `#graphql
-    query {
-      locations(first: 1) {
-        edges {
-          node {
-            id
-          }
-        }
-      }
-    }`
-  );
-
-  const destLocationId =
-    destLocationsResult.data?.locations?.edges?.[0]?.node?.id;
-  if (!destLocationId) {
-    return [
-      {
-        success: false,
-        action: "SKIP",
-        sourceGid: sourceProductGid,
-        error: "No destination location found",
-        duration: 0,
-      },
-    ];
-  }
-
   for (const sourceEdge of sourceResult.data.product.variants.edges) {
     const sourceVariant = sourceEdge.node;
     const startTime = Date.now();
-
-    // Find destination variant
     const variantMap = variantMappings.find(
       (m) => m.sourceVariantGid === sourceVariant.id
     );
     if (!variantMap?.destVariantGid) continue;
 
-    // Get source available quantity
-    const sourceLevel =
-      sourceVariant.inventoryItem?.inventoryLevels?.edges?.[0]?.node;
-    const sourceAvailable =
-      sourceLevel?.quantities?.find((q: any) => q.name === "available")
-        ?.quantity ?? 0;
-
-    // Get destination inventory item ID + whether it's stocked at the dest location
-    const destVariantResult = await destClient.queryWithRetry(
-      `#graphql
-      query GetVariantInventory($id: ID!, $locationId: ID!) {
-        productVariant(id: $id) {
-          inventoryItem {
-            id
-            inventoryLevel(locationId: $locationId) {
-              id
-            }
-          }
-        }
-      }`,
-      { id: variantMap.destVariantGid, locationId: destLocationId }
-    );
-
-    const destInventoryItem =
-      destVariantResult.data?.productVariant?.inventoryItem;
-    const destInventoryItemId = destInventoryItem?.id;
-    if (!destInventoryItemId) {
+    if (!sourceVariant.inventoryItem?.tracked) {
       results.push({
-        success: false,
+        success: true,
         action: "SKIP",
         sourceGid: sourceVariant.id,
-        error: "Destination inventory item not found",
         duration: Date.now() - startTime,
       });
       continue;
     }
 
-    // If the item isn't stocked at the destination location yet (common right
-    // after a product is created), activate it there with the starting
-    // quantity. inventorySetQuantities can't set a quantity on an item that
-    // isn't activated at the location, which is why inventory looked "not
-    // tracked" before.
     try {
-      if (!destInventoryItem.inventoryLevel) {
-        const activateResult = await destClient.queryWithRetry(
-          INVENTORY_ACTIVATE_MUTATION,
-          {
-            inventoryItemId: destInventoryItemId,
-            locationId: destLocationId,
-            available: sourceAvailable,
-          }
-        );
-
-        const activateErrors =
-          activateResult.data?.inventoryActivate?.userErrors;
-        if (activateErrors?.length) {
-          results.push({
-            success: false,
-            action: "UPDATE",
-            sourceGid: sourceVariant.id,
-            error: activateErrors[0].message,
-            duration: Date.now() - startTime,
-          });
-        } else {
-          results.push({
-            success: true,
-            action: "UPDATE",
-            sourceGid: sourceVariant.id,
-            duration: Date.now() - startTime,
-          });
-        }
-        continue;
-      }
-
-      // Already stocked at this location — update the available quantity.
-      const setResult = await destClient.queryWithRetry(
-        INVENTORY_SET_QUANTITIES_MUTATION,
-        {
-          input: {
-            reason: "correction",
-            name: "available",
-            ignoreCompareQuantity: true,
-            quantities: [
-              {
-                inventoryItemId: destInventoryItemId,
-                locationId: destLocationId,
-                quantity: sourceAvailable,
-              },
-            ],
-          },
-        }
+      const levels = sourceVariant.inventoryItem?.inventoryLevels?.edges || [];
+      const sourceAvailable = levels.length
+        ? availableQuantityFromLevels(levels)
+        : sourceVariant.inventoryQuantity ?? 0;
+      const error = await setDestinationInventoryQuantity(
+        destClient,
+        variantMap.destVariantGid,
+        sourceAvailable
       );
 
-      if (setResult.data?.inventorySetQuantities?.userErrors?.length) {
-        results.push({
-          success: false,
-          action: "UPDATE",
-          sourceGid: sourceVariant.id,
-          error:
-            setResult.data.inventorySetQuantities.userErrors[0].message,
-          duration: Date.now() - startTime,
-        });
-      } else {
-        results.push({
-          success: true,
-          action: "UPDATE",
-          sourceGid: sourceVariant.id,
-          duration: Date.now() - startTime,
-        });
-      }
+      results.push({
+        success: !error,
+        action: "UPDATE",
+        sourceGid: sourceVariant.id,
+        error: error || undefined,
+        duration: Date.now() - startTime,
+      });
     } catch (error) {
       results.push({
         success: false,
@@ -253,51 +263,88 @@ export async function syncProductInventory(
 }
 
 /**
- * Sync inventory for a single inventory item (from webhook)
+ * Sync inventory for a single inventory item from an inventory webhook.
  */
 export async function syncInventoryItem(
   syncRule: SyncRuleWithRelations,
   inventoryItemId: string,
   available: number,
+  sourceClient: ShopifyGraphQLClient,
   destClient: ShopifyGraphQLClient
 ): Promise<SyncInventoryResult> {
   const startTime = Date.now();
 
   try {
-    // Find which product/variant this inventory item belongs to
-    // We need to look up the variant by inventory item on source, then find dest mapping
-    // For webhook-triggered sync, we need to find the mapping
-    const destLocationsResult = await destClient.queryWithRetry(
+    const sourceResult = await sourceClient.queryWithRetry(
       `#graphql
-      query {
-        locations(first: 1) {
-          edges {
-            node {
-              id
+      query GetInventoryItemVariant($id: ID!) {
+        inventoryItem(id: $id) {
+          id
+          tracked
+          variants(first: 10) {
+            edges {
+              node {
+                id
+                product {
+                  id
+                }
+              }
             }
           }
         }
-      }`
+      }`,
+      { id: inventoryItemId }
     );
 
-    const destLocationId =
-      destLocationsResult.data?.locations?.edges?.[0]?.node?.id;
-    if (!destLocationId) {
+    const sourceInventoryItem = sourceResult.data?.inventoryItem;
+    const sourceVariant =
+      sourceInventoryItem?.variants?.edges?.[0]?.node || null;
+    const sourceProductGid = sourceVariant?.product?.id;
+
+    if (!sourceInventoryItem?.tracked || !sourceVariant?.id || !sourceProductGid) {
       return {
-        success: false,
+        success: true,
         action: "SKIP",
         sourceGid: inventoryItemId,
-        error: "No destination location found",
         duration: Date.now() - startTime,
       };
     }
 
-    // For now, log the webhook and handle via full product sync
-    // Full inventory item mapping requires additional tracking
+    const mapping = await prisma.productMapping.findUnique({
+      where: {
+        sourceStoreId_destStoreId_sourceProductGid: {
+          sourceStoreId: syncRule.sourceStoreId,
+          destStoreId: syncRule.destStoreId,
+          sourceProductGid,
+        },
+      },
+    });
+    const variantMappings = parseVariantMappings(mapping?.variantMappings);
+    const variantMap = variantMappings.find(
+      (m) => m.sourceVariantGid === sourceVariant.id
+    );
+
+    if (!mapping?.destProductGid || !variantMap?.destVariantGid) {
+      return {
+        success: false,
+        action: "SKIP",
+        sourceGid: inventoryItemId,
+        error: "No destination variant mapping found",
+        duration: Date.now() - startTime,
+      };
+    }
+
+    const error = await setDestinationInventoryQuantity(
+      destClient,
+      variantMap.destVariantGid,
+      available
+    );
+
     return {
-      success: true,
-      action: "SKIP",
+      success: !error,
+      action: "UPDATE",
       sourceGid: inventoryItemId,
+      error: error || undefined,
       duration: Date.now() - startTime,
     };
   } catch (error) {

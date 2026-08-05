@@ -295,12 +295,14 @@ export async function handleInventoryWebhook(
 
   for (const rule of syncRules) {
     try {
+      const sourceClient = await createClientForStore(rule.sourceStoreId);
       const destClient = await createClientForStore(rule.destStoreId);
 
       const result = await syncInventoryItem(
         rule as SyncRuleWithRelations,
         inventoryItemId,
         available,
+        sourceClient,
         destClient
       );
 
