@@ -3,7 +3,6 @@ import prisma from "../db.server";
 import type { ShopifyGraphQLClient } from "./shopify-client.server";
 import { createClientForStore } from "./shopify-client.server";
 import {
-  GET_COLLECTIONS,
   GET_COLLECTION_PRODUCTS,
   GET_JOB_STATUS,
 } from "../graphql/queries";
@@ -997,18 +996,37 @@ export async function fetchAllCollections(
   sourceClient: ShopifyGraphQLClient,
   searchQuery?: string
 ): Promise<Array<{ id: string; title: string; handle: string }>> {
+  const PICKER_COLLECTIONS_QUERY = `#graphql
+    query GetPickerCollections($first: Int!, $after: String, $query: String) {
+      collections(first: $first, after: $after, query: $query, sortKey: TITLE) {
+        edges {
+          node {
+            id
+            title
+            handle
+          }
+        }
+        pageInfo {
+          hasNextPage
+          endCursor
+        }
+      }
+    }
+  `;
+
   const byId = new Map<string, { id: string; title: string; handle: string }>();
   const errors: string[] = [];
   const rawQuery = searchQuery?.trim();
   const handleQuery = rawQuery?.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, "");
-  const queryVariants = rawQuery
+  const queryVariants: Array<string | undefined> = rawQuery
     ? [
         rawQuery,
         `title:${rawQuery}*`,
-        handleQuery ? `handle:${handleQuery}*` : null,
+        handleQuery ? `handle:${handleQuery}*` : undefined,
         `collection_type:smart title:${rawQuery}*`,
         `collection_type:custom title:${rawQuery}*`,
-      ].filter(Boolean) as string[]
+        undefined,
+      ]
     : [undefined];
 
   for (const query of queryVariants) {
@@ -1016,7 +1034,7 @@ export async function fetchAllCollections(
     let cursor: string | null = null;
 
     while (hasNext) {
-      const result: any = await sourceClient.queryWithRetry(GET_COLLECTIONS, {
+      const result: any = await sourceClient.queryWithRetry(PICKER_COLLECTIONS_QUERY, {
         first: 50,
         after: cursor,
         query,
@@ -1047,9 +1065,16 @@ export async function fetchAllCollections(
     }
   }
 
-  const collections = [...byId.values()];
+  let collections = [...byId.values()];
   if (collections.length === 0 && errors.length > 0) {
     throw new Error(`Failed to fetch collections: ${errors.join(" | ")}`);
+  }
+
+  if (rawQuery) {
+    const normalizedQuery = rawQuery.toLowerCase();
+    collections = collections.filter((collection) =>
+      `${collection.title} ${collection.handle}`.toLowerCase().includes(normalizedQuery)
+    );
   }
 
   return collections.sort((a, b) => a.title.localeCompare(b.title));
