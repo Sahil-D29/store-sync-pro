@@ -122,6 +122,7 @@ async function fetchSourceCollectionData(
   mapping: CollectionMappingWithStores,
   sourceClient: ShopifyGraphQLClient
 ): Promise<SourceCollectionData> {
+  const lookupErrors: string[] = [];
   const byIdResult: any = await sourceClient.queryWithRetry(
     `${COLLECTION_FIELDS}
     query GetCollection($id: ID!) {
@@ -133,8 +134,8 @@ async function fetchSourceCollectionData(
   );
 
   if (byIdResult.errors?.length) {
-    throw new Error(
-      `Failed to fetch collection ${mapping.sourceCollectionGid}: ${byIdResult.errors
+    lookupErrors.push(
+      `id lookup: ${byIdResult.errors
         .map((error: { message: string }) => error.message)
         .join("; ")}`
     );
@@ -142,6 +143,58 @@ async function fetchSourceCollectionData(
 
   if (byIdResult.data?.collection) {
     return byIdResult.data.collection;
+  }
+
+  if (mapping.sourceHandle) {
+    const byIdentifierResult: any = await sourceClient.queryWithRetry(
+      `${COLLECTION_FIELDS}
+      query GetCollectionByIdentifier($identifier: CollectionIdentifierInput!) {
+        collectionByIdentifier(identifier: $identifier) {
+          ...CollectionFields
+        }
+      }`,
+      { identifier: { handle: mapping.sourceHandle } }
+    );
+
+    if (byIdentifierResult.data?.collectionByIdentifier) {
+      console.warn(
+        `[CollectionSync] Collection ${mapping.sourceCollectionGid} was not visible via collection(id:) on ${mapping.sourceStore.shopDomain}; using collectionByIdentifier(handle: "${mapping.sourceHandle}")`
+      );
+      return byIdentifierResult.data.collectionByIdentifier;
+    }
+
+    if (byIdentifierResult.errors?.length) {
+      lookupErrors.push(
+        `identifier handle lookup: ${byIdentifierResult.errors
+          .map((error: { message: string }) => error.message)
+          .join("; ")}`
+      );
+    }
+
+    const byHandleResult: any = await sourceClient.queryWithRetry(
+      `${COLLECTION_FIELDS}
+      query GetCollectionByHandle($handle: String!) {
+        collectionByHandle(handle: $handle) {
+          ...CollectionFields
+        }
+      }`,
+      { handle: mapping.sourceHandle }
+    );
+
+    if (byHandleResult.data?.collectionByHandle) {
+      console.warn(
+        `[CollectionSync] Collection ${mapping.sourceCollectionGid} was not visible via collection(id:) on ${mapping.sourceStore.shopDomain}; using collectionByHandle("${mapping.sourceHandle}")`
+      );
+      return byHandleResult.data.collectionByHandle;
+    }
+
+    if (byHandleResult.errors?.length) {
+      lookupErrors.push(
+        `handle lookup: ${byHandleResult.errors
+          .map((error: { message: string }) => error.message)
+          .join("; ")}`
+      );
+    }
   }
 
   const fallbackQueries = [
@@ -167,11 +220,12 @@ async function fetchSourceCollectionData(
     );
 
     if (bySearchResult.errors?.length) {
-      throw new Error(
-        `Failed to search collection ${mapping.sourceCollectionGid}: ${bySearchResult.errors
+      lookupErrors.push(
+        `collections search "${query}": ${bySearchResult.errors
           .map((error: { message: string }) => error.message)
           .join("; ")}`
       );
+      continue;
     }
 
     const collection = bySearchResult.data?.collections?.edges?.[0]?.node;
@@ -183,8 +237,17 @@ async function fetchSourceCollectionData(
     }
   }
 
+  const lookupDetails = [
+    `stored id ${mapping.sourceCollectionGid}`,
+    mapping.sourceHandle ? `handle "${mapping.sourceHandle}"` : null,
+    fallbackQueries.length ? `searches ${fallbackQueries.join(", ")}` : null,
+    lookupErrors.length ? `errors: ${lookupErrors.join(" | ")}` : null,
+  ]
+    .filter(Boolean)
+    .join("; ");
+
   throw new Error(
-    `Collection ${mapping.sourceCollectionGid} was not found on ${mapping.sourceStore.shopDomain}`
+    `Collection ${mapping.sourceCollectionGid} was not found on ${mapping.sourceStore.shopDomain} (${lookupDetails})`
   );
 }
 
@@ -198,13 +261,41 @@ export async function syncCollection(
   runStats?: CollectionSyncRunStats
 ): Promise<SyncCollectionResult> {
   const startTime = Date.now();
-  const sourceCollectionGid = mapping.sourceCollectionGid;
+  let sourceCollectionGid = mapping.sourceCollectionGid;
 
   try {
     const sourceCollection = await fetchSourceCollectionData(
       mapping,
       sourceClient
     );
+    const effectiveMapping =
+      sourceCollection.id && sourceCollection.id !== mapping.sourceCollectionGid
+        ? {
+            ...mapping,
+            sourceCollectionGid: sourceCollection.id,
+            sourceHandle: sourceCollection.handle || mapping.sourceHandle,
+          }
+        : mapping;
+
+    sourceCollectionGid = effectiveMapping.sourceCollectionGid;
+
+    if (effectiveMapping.sourceCollectionGid !== mapping.sourceCollectionGid) {
+      await prisma.collectionMapping
+        .update({
+          where: { id: mapping.id },
+          data: {
+            sourceCollectionGid: effectiveMapping.sourceCollectionGid,
+            sourceHandle: effectiveMapping.sourceHandle,
+          },
+        })
+        .catch((error) =>
+          console.warn(
+            `[CollectionSync] Could not update mapping ${mapping.id} to live collection ${effectiveMapping.sourceCollectionGid}:`,
+            error
+          )
+        );
+    }
+
     const isNew = !mapping.destCollectionGid;
 
     // Build collection input
@@ -299,7 +390,7 @@ export async function syncCollection(
     // so we only manage membership/order for manual collections.
     if (!sourceCollection.ruleSet) {
       await syncCollectionProducts(
-        mapping,
+        effectiveMapping,
         destCollectionGid,
         sourceCollection.sortOrder,
         sourceClient,
