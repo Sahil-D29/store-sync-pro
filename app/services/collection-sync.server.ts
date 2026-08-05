@@ -117,6 +117,21 @@ function legacyCollectionIdFromGid(collectionGid: string): string | null {
   return collectionGid.match(/gid:\/\/shopify\/Collection\/(\d+)/)?.[1] || null;
 }
 
+function fallbackCollectionData(mapping: CollectionMappingWithStores): SourceCollectionData {
+  const legacyId = legacyCollectionIdFromGid(mapping.sourceCollectionGid);
+  return {
+    id: mapping.sourceCollectionGid,
+    title: mapping.destTitle || mapping.sourceHandle || (legacyId ? `Collection #${legacyId}` : "Imported collection"),
+    handle: mapping.sourceHandle || "",
+    descriptionHtml: null,
+    sortOrder: null,
+    templateSuffix: null,
+    image: null,
+    seo: null,
+    ruleSet: null,
+  };
+}
+
 async function fetchSourceCollectionData(
   mapping: CollectionMappingWithStores,
   sourceClient: ShopifyGraphQLClient
@@ -245,9 +260,10 @@ async function fetchSourceCollectionData(
     .filter(Boolean)
     .join("; ");
 
-  throw new Error(
-    `Collection ${mapping.sourceCollectionGid} was not found on ${mapping.sourceStore.shopDomain} (${lookupDetails})`
+  console.warn(
+    `[CollectionSync] Collection ${mapping.sourceCollectionGid} metadata was not visible on ${mapping.sourceStore.shopDomain}; continuing with minimal collection data so product fallback can run (${lookupDetails})`
   );
+  return fallbackCollectionData(mapping);
 }
 
 /**
