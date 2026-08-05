@@ -163,6 +163,34 @@ export class ShopifyGraphQLClient {
   getShopDomain(): string {
     return this.shopDomain;
   }
+
+  async rest<T = any>(path: string): Promise<T> {
+    const cleanPath = path.replace(/^\/+/, "");
+    const url = `https://${this.shopDomain}/admin/api/${this.apiVersion}/${cleanPath}`;
+
+    const response = await fetch(url, {
+      method: "GET",
+      headers: {
+        "Content-Type": "application/json",
+        "X-Shopify-Access-Token": this.accessToken,
+      },
+    });
+
+    if (response.status === 429) {
+      const retryAfter = response.headers.get("Retry-After");
+      const waitTime = retryAfter ? parseInt(retryAfter, 10) * 1000 : 2000;
+      await sleep(waitTime);
+      return this.rest<T>(path);
+    }
+
+    if (!response.ok) {
+      throw new Error(
+        `Shopify REST API error: ${response.status} ${response.statusText} (${this.shopDomain})`
+      );
+    }
+
+    return response.json();
+  }
 }
 
 /**

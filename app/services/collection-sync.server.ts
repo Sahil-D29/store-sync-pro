@@ -117,6 +117,30 @@ function legacyCollectionIdFromGid(collectionGid: string): string | null {
   return collectionGid.match(/gid:\/\/shopify\/Collection\/(\d+)/)?.[1] || null;
 }
 
+function shopifyEnum(value: string | null | undefined): string | null {
+  if (!value) return null;
+  return value.replace(/-/g, "_").toUpperCase();
+}
+
+function mapRestRuleColumn(column: string): string {
+  const normalized = shopifyEnum(column) || column;
+  const aliases: Record<string, string> = {
+    PRODUCT_TITLE: "TITLE",
+    PRODUCT_TYPE: "TYPE",
+    INVENTORY_STOCK: "VARIANT_INVENTORY",
+  };
+  return aliases[normalized] || normalized;
+}
+
+function mapRestRuleRelation(relation: string): string {
+  const normalized = shopifyEnum(relation) || relation;
+  const aliases: Record<string, string> = {
+    EQUAL: "EQUALS",
+    NOT_EQUAL: "NOT_EQUALS",
+  };
+  return aliases[normalized] || normalized;
+}
+
 function fallbackCollectionData(mapping: CollectionMappingWithStores): SourceCollectionData {
   const legacyId = legacyCollectionIdFromGid(mapping.sourceCollectionGid);
   return {
@@ -124,12 +148,97 @@ function fallbackCollectionData(mapping: CollectionMappingWithStores): SourceCol
     title: mapping.destTitle || mapping.sourceHandle || (legacyId ? `Collection #${legacyId}` : "Imported collection"),
     handle: mapping.sourceHandle || "",
     descriptionHtml: null,
-    sortOrder: null,
+    sortOrder: "MANUAL",
     templateSuffix: null,
     image: null,
     seo: null,
     ruleSet: null,
   };
+}
+
+async function fetchRestCollectionData(
+  mapping: CollectionMappingWithStores,
+  sourceClient: ShopifyGraphQLClient
+): Promise<SourceCollectionData | null> {
+  const legacyId = legacyCollectionIdFromGid(mapping.sourceCollectionGid);
+  if (!legacyId) return null;
+
+  try {
+    const result = await sourceClient.rest<any>(`smart_collections/${legacyId}.json`);
+    const collection = result?.smart_collection;
+    if (collection) {
+      console.warn(
+        `[CollectionSync] Using REST smart_collection fallback for ${mapping.sourceCollectionGid} on ${mapping.sourceStore.shopDomain}`
+      );
+      return {
+        id: mapping.sourceCollectionGid,
+        title: collection.title || mapping.destTitle || `Collection #${legacyId}`,
+        handle: collection.handle || mapping.sourceHandle || "",
+        descriptionHtml: collection.body_html || null,
+        sortOrder: shopifyEnum(collection.sort_order) || "MANUAL",
+        templateSuffix: collection.template_suffix || null,
+        image: collection.image?.src
+          ? {
+              url: collection.image.src,
+              altText: collection.image.alt || null,
+            }
+          : null,
+        seo: {
+          title: collection.metafields_global_title_tag || null,
+          description: collection.metafields_global_description_tag || null,
+        },
+        ruleSet: {
+          appliedDisjunctively: !!collection.disjunctive,
+          rules: (collection.rules || []).map((rule: any) => ({
+            column: mapRestRuleColumn(rule.column),
+            relation: mapRestRuleRelation(rule.relation),
+            condition: String(rule.condition ?? ""),
+          })),
+        },
+      };
+    }
+  } catch (error) {
+    console.warn(
+      `[CollectionSync] REST smart_collection lookup failed for ${mapping.sourceCollectionGid}:`,
+      (error as Error).message
+    );
+  }
+
+  try {
+    const result = await sourceClient.rest<any>(`custom_collections/${legacyId}.json`);
+    const collection = result?.custom_collection;
+    if (collection) {
+      console.warn(
+        `[CollectionSync] Using REST custom_collection fallback for ${mapping.sourceCollectionGid} on ${mapping.sourceStore.shopDomain}`
+      );
+      return {
+        id: mapping.sourceCollectionGid,
+        title: collection.title || mapping.destTitle || `Collection #${legacyId}`,
+        handle: collection.handle || mapping.sourceHandle || "",
+        descriptionHtml: collection.body_html || null,
+        sortOrder: shopifyEnum(collection.sort_order) || "MANUAL",
+        templateSuffix: collection.template_suffix || null,
+        image: collection.image?.src
+          ? {
+              url: collection.image.src,
+              altText: collection.image.alt || null,
+            }
+          : null,
+        seo: {
+          title: collection.metafields_global_title_tag || null,
+          description: collection.metafields_global_description_tag || null,
+        },
+        ruleSet: null,
+      };
+    }
+  } catch (error) {
+    console.warn(
+      `[CollectionSync] REST custom_collection lookup failed for ${mapping.sourceCollectionGid}:`,
+      (error as Error).message
+    );
+  }
+
+  return null;
 }
 
 async function fetchSourceCollectionData(
@@ -259,6 +368,9 @@ async function fetchSourceCollectionData(
   ]
     .filter(Boolean)
     .join("; ");
+
+  const restCollection = await fetchRestCollectionData(mapping, sourceClient);
+  if (restCollection) return restCollection;
 
   console.warn(
     `[CollectionSync] Collection ${mapping.sourceCollectionGid} metadata was not visible on ${mapping.sourceStore.shopDomain}; continuing with minimal collection data so product fallback can run (${lookupDetails})`
