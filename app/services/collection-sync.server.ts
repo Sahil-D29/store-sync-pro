@@ -532,6 +532,12 @@ export async function syncCollection(
             { collection: collectionInput }
           );
 
+      if (updateResult.data?.collectionUpdate?.collection) {
+        console.log(
+          `[CollectionSync] Updated destination collection ${destCollectionGid} sortOrder=${updateResult.data.collectionUpdate.collection.sortOrder || "unknown"}`
+        );
+      }
+
       if (updateResult.data?.collectionUpdate?.userErrors?.length) {
         return {
           success: false,
@@ -835,6 +841,12 @@ async function syncCollectionProducts(
         COLLECTION_REORDER_PRODUCTS_MUTATION,
         { id: destCollectionGid, moves: batch }
       );
+      if (res.data?.collectionReorderProducts?.userErrors?.length) {
+        console.warn(
+          `[CollectionSync] collectionReorderProducts userErrors for ${destCollectionGid}:`,
+          JSON.stringify(res.data.collectionReorderProducts.userErrors)
+        );
+      }
       const jobId = res.data?.collectionReorderProducts?.job?.id;
       await waitForJob(destClient, jobId);
     }
