@@ -94,6 +94,25 @@ function sourceLabel(sourceGid?: string) {
   return sourceGid.replace("gid://shopify/Product/", "#").replace("gid://shopify/Collection/", "Collection #");
 }
 
+function parseShopifyCollectionGid(value: string) {
+  const trimmed = value.trim();
+  if (!trimmed) return "";
+
+  const gidMatch = trimmed.match(/gid:\/\/shopify\/Collection\/(\d+)/i);
+  if (gidMatch) return `gid://shopify/Collection/${gidMatch[1]}`;
+
+  const adminUrlMatch = trimmed.match(/\/collections\/(\d+)/i);
+  if (adminUrlMatch) return `gid://shopify/Collection/${adminUrlMatch[1]}`;
+
+  if (/^\d{6,}$/.test(trimmed)) return `gid://shopify/Collection/${trimmed}`;
+
+  return "";
+}
+
+function collectionNumberFromGid(gid: string) {
+  return gid.replace("gid://shopify/Collection/", "");
+}
+
 const DEFAULT_DEST_SELECTION: DestSelection = {
   checked: false,
   destMode: "new",
@@ -523,6 +542,14 @@ export default function CollectionMappingPage() {
   const [sourceQuery, setSourceQuery] = useState("");
   const [missingProductAction, setMissingProductAction] = useState("SKIP");
   const [triggerMode, setTriggerMode] = useState("REALTIME");
+  const pastedSourceCollectionGid = useMemo(() => parseShopifyCollectionGid(sourceQuery), [sourceQuery]);
+  const selectedSourceCollection = sourceCollection || (pastedSourceCollectionGid
+    ? {
+        id: pastedSourceCollectionGid,
+        title: `Collection #${collectionNumberFromGid(pastedSourceCollectionGid)}`,
+        handle: "",
+      }
+    : null);
 
   const chosenEntries = Object.entries(destSelections).filter(([, s]) => s.checked);
   const hasIncompleteExisting = chosenEntries.some(
@@ -555,30 +582,17 @@ export default function CollectionMappingPage() {
     }));
   }, [sourceCollectionsFetcher.data, sourceQuery]);
 
-  const openSourceCollectionPicker = useCallback(async () => {
-    try {
-      const selected = await (window as any).shopify.resourcePicker({
-        type: "collection",
-        action: "select",
-        multiple: false,
-        selectionIds: sourceCollection ? [{ id: sourceCollection.id }] : [],
-      });
-
-      if (selected?.length) {
-        setSourceCollection({
-          id: selected[0].id,
-          title: selected[0].title,
-          handle: selected[0].handle,
-        });
-        setSourceQuery(selected[0].title);
-      }
-    } catch (error) {
-      console.error("Collection picker error:", error);
-    }
-  }, [sourceCollection]);
+  const usePastedSourceCollection = useCallback(() => {
+    if (!pastedSourceCollectionGid) return;
+    setSourceCollection({
+      id: pastedSourceCollectionGid,
+      title: `Collection #${collectionNumberFromGid(pastedSourceCollectionGid)}`,
+      handle: "",
+    });
+  }, [pastedSourceCollectionGid]);
 
   const handleCreateMapping = () => {
-    if (!chosenEntries.length || !sourceCollection || hasIncompleteExisting) return;
+    if (!chosenEntries.length || !selectedSourceCollection || hasIncompleteExisting) return;
     const fd = new FormData();
     fd.set("intent", "create-mapping");
     fd.set(
@@ -598,8 +612,8 @@ export default function CollectionMappingPage() {
         }))
       )
     );
-    fd.set("sourceCollectionGid", sourceCollection.id);
-    fd.set("sourceHandle", sourceCollection.handle);
+    fd.set("sourceCollectionGid", selectedSourceCollection.id);
+    fd.set("sourceHandle", selectedSourceCollection.handle);
     fd.set("missingProductAction", missingProductAction);
     fd.set("triggerMode", triggerMode);
     submit(fd, { method: "POST" });
@@ -825,7 +839,7 @@ export default function CollectionMappingPage() {
                           }}
                           placeholder={
                             sourceStore
-                              ? `Search ${sourceStore.shopName || sourceStore.shopDomain} collections`
+                              ? `Search ${sourceStore.shopName || sourceStore.shopDomain} collections or paste a collection URL`
                               : "Source store not connected"
                           }
                           autoComplete="off"
@@ -833,10 +847,15 @@ export default function CollectionMappingPage() {
                       }
                     />
                   </div>
-                  <Button onClick={openSourceCollectionPicker}>
-                    Browse Shopify
+                  <Button onClick={usePastedSourceCollection} disabled={!pastedSourceCollectionGid}>
+                    Use ID/URL
                   </Button>
                 </InlineStack>
+                {pastedSourceCollectionGid && !sourceCollection && (
+                  <Text as="p" variant="bodySm" tone="subdued">
+                    Ready to use Collection #{collectionNumberFromGid(pastedSourceCollectionGid)}. It will be checked on the source store before saving.
+                  </Text>
+                )}
                 {sourceCollectionsFetcher.data?.error && (
                   <Text as="p" variant="bodySm" tone="critical">
                     {sourceCollectionsFetcher.data.error}
@@ -883,7 +902,7 @@ export default function CollectionMappingPage() {
                   variant="primary"
                   onClick={handleCreateMapping}
                   loading={isSubmitting}
-                  disabled={!chosenEntries.length || !sourceCollection || hasIncompleteExisting}
+                  disabled={!chosenEntries.length || !selectedSourceCollection || hasIncompleteExisting}
                 >
                   Connect collection
                 </Button>
