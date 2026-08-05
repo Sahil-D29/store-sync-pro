@@ -1,10 +1,7 @@
 import { createHash } from "crypto";
 import type { PriceRule, ConnectedStore, DestProductStatus } from "@prisma/client";
 import prisma from "../db.server";
-import {
-  ShopifyGraphQLClient,
-  createClientForStore,
-} from "./shopify-client.server";
+import type { ShopifyGraphQLClient } from "./shopify-client.server";
 import { GET_PRODUCT_FOR_SYNC } from "../graphql/queries";
 import { PRODUCT_SET_MUTATION, PRODUCT_DELETE_MUTATION } from "../graphql/mutations";
 import { transformPrice, getExchangeRate } from "./price-transformer.server";
@@ -427,6 +424,12 @@ export async function deleteProductOnDestination(
 /**
  * Build ProductSetInput from source product data
  */
+function canCopyProductMetafieldToDestination(metafield: any): boolean {
+  const type = String(metafield.type || "");
+  const value = String(metafield.value || "");
+  return !type.includes("metaobject_reference") && !value.includes("gid://shopify/Metaobject/");
+}
+
 async function buildProductSetInput(
   sourceProduct: any,
   syncRule: SyncRuleWithRelations,
@@ -580,12 +583,19 @@ async function buildProductSetInput(
     syncRule.syncMetafields &&
     sourceProduct.metafields?.edges?.length
   ) {
-    input.metafields = sourceProduct.metafields.edges.map((edge: any) => ({
-      namespace: edge.node.namespace,
-      key: edge.node.key,
-      value: edge.node.value,
-      type: edge.node.type,
-    }));
+    const metafields = sourceProduct.metafields.edges
+      .map((edge: any) => edge.node)
+      .filter(canCopyProductMetafieldToDestination)
+      .map((metafield: any) => ({
+        namespace: metafield.namespace,
+        key: metafield.key,
+        value: metafield.value,
+        type: metafield.type,
+      }));
+
+    if (metafields.length) {
+      input.metafields = metafields;
+    }
   }
 
   return input;
