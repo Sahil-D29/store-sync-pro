@@ -523,9 +523,11 @@ export async function triggerManualSync(
           true // forceSync - manual sync always forces re-sync
         );
 
+        let extraErrors: string[] = [];
+
         // Sync extras after successful product sync
         if (result.success && result.destGid) {
-          const extraErrors = await syncProductExtras(
+          extraErrors = await syncProductExtras(
             rule as SyncRuleWithRelations,
             gid,
             result.destGid,
@@ -537,6 +539,11 @@ export async function triggerManualSync(
           }
         }
 
+        const itemSucceeded = result.success && extraErrors.length === 0;
+        const errorDetail =
+          result.error ||
+          (extraErrors.length > 0 ? extraErrors.join("; ") : undefined);
+
         await prisma.syncLog.create({
           data: {
             syncRuleId: rule.id,
@@ -545,21 +552,21 @@ export async function triggerManualSync(
             resourceType: "PRODUCT",
             sourceGid: result.sourceGid,
             destGid: result.destGid,
-            status: result.success ? "SUCCESS" : "FAILED",
+            status: itemSucceeded ? "SUCCESS" : "FAILED",
             trigger: "MANUAL",
-            errorDetail: result.error,
+            errorDetail,
             duration: result.duration,
           },
         });
 
-        if (result.success) {
+        if (itemSucceeded) {
           if (result.action === "SKIP") skipped++;
           else synced++;
         } else {
           failed++;
           syncErrors.push({
             sourceGid: result.sourceGid || gid,
-            error: result.error || "Unknown product sync error",
+            error: errorDetail || "Unknown product sync error",
           });
         }
 

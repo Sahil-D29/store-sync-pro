@@ -460,17 +460,6 @@ export async function syncProductInventory(
     );
     if (!variantMap?.destVariantGid) continue;
 
-    if (!sourceVariant.inventoryItem?.tracked) {
-      results.push({
-        success: false,
-        action: "SKIP",
-        sourceGid: sourceVariant.id,
-        error: "Source inventory item is not tracked",
-        duration: Date.now() - startTime,
-      });
-      continue;
-    }
-
     try {
       const levels = sourceVariant.inventoryItem?.inventoryLevels?.edges || [];
       const sourceAvailable = levels.length
@@ -480,6 +469,10 @@ export async function syncProductInventory(
         destClient,
         variantMap.destVariantGid,
         sourceAvailable
+      );
+
+      console.log(
+        `[InventorySync] Product ${sourceProductGid} variant ${sourceVariant.id} -> ${variantMap.destVariantGid}: available=${sourceAvailable} ${error ? `error=${error}` : "ok"}`
       );
 
       results.push({
@@ -552,13 +545,13 @@ export async function syncInventoryItem(
       sourceInventoryItem?.variants?.edges?.[0]?.node || null;
     const sourceProductGid = sourceVariant?.product?.id;
 
-    if (!sourceInventoryItem?.tracked || !sourceVariant?.id || !sourceProductGid) {
+    if (!sourceInventoryItem || !sourceVariant?.id || !sourceProductGid) {
       return {
         success: false,
         action: "SKIP",
         sourceGid: inventoryItemId,
-        error: !sourceInventoryItem?.tracked
-          ? "Source inventory item is not tracked"
+        error: !sourceInventoryItem
+          ? "Source inventory item not found"
           : "Source variant/product not found for inventory item",
         duration: Date.now() - startTime,
       };
@@ -608,6 +601,14 @@ export async function syncInventoryItem(
       sourceInventoryItem.inventoryLevels?.edges?.length
         ? availableQuantityFromLevels(sourceInventoryItem.inventoryLevels.edges)
         : available
+    );
+
+    console.log(
+      `[InventorySync] Item ${inventoryItemId} variant ${sourceVariant.id} -> ${variantMap.destVariantGid}: available=${
+        sourceInventoryItem.inventoryLevels?.edges?.length
+          ? availableQuantityFromLevels(sourceInventoryItem.inventoryLevels.edges)
+          : available
+      } ${error ? `error=${error}` : "ok"}`
     );
 
     return {

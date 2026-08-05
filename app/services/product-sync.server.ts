@@ -542,10 +542,10 @@ async function buildProductSetInput(
           }
         }
 
-        // Mirror the source's inventory tracking so the destination doesn't
-        // show "Inventory not tracked". Only enable tracking when the rule
-        // syncs inventory AND the source variant is actually tracked.
-        if (syncRule.syncInventory && variant.inventoryItem?.tracked) {
+        // Inventory sync is explicit opt-in. Enable tracking on destination so
+        // the later inventory quantity write is visible even if source tracking
+        // is disabled but Shopify still exposes an available quantity.
+        if (syncRule.syncInventory) {
           variantInput.inventoryItem = { tracked: true };
           variantInput.inventoryPolicy = variant.inventoryPolicy || "DENY";
         }
