@@ -348,7 +348,8 @@ export const action = async ({ request }: ActionFunctionArgs) => {
 
   switch (intent) {
     case "create-mapping": {
-      const sourceCollectionGid = formData.get("sourceCollectionGid") as string;
+      const rawSourceCollectionGid = formData.get("sourceCollectionGid") as string;
+      const sourceCollectionGid = parseShopifyCollectionGid(rawSourceCollectionGid);
       let sourceHandle = (formData.get("sourceHandle") as string) || "";
       const missingProductAction = parseMissingProductAction(formData.get("missingProductAction"));
       const triggerMode = parseTriggerMode(formData.get("triggerMode"));
@@ -399,21 +400,26 @@ export const action = async ({ request }: ActionFunctionArgs) => {
         }`,
         { id: sourceCollectionGid }
       );
-      if (sourceCollectionResult.errors?.length || !sourceCollectionResult.data?.collection) {
-        return json(
-          {
-            error: `Selected source collection was not found on ${ownerShop}. Choose it from the source collection list again.`,
-          },
-          { status: 400 }
+      if (sourceCollectionResult.data?.collection) {
+        sourceHandle = sourceCollectionResult.data.collection.handle || sourceHandle;
+      } else {
+        console.warn(
+          `[CollectionMapping] Source collection ${sourceCollectionGid} was not visible during create on ${ownerShop}; saving mapping so sync can use fallback lookup. ${
+            sourceCollectionResult.errors?.length
+              ? sourceCollectionResult.errors.map((error: { message: string }) => error.message).join("; ")
+              : ""
+          }`
         );
       }
-      sourceHandle = sourceCollectionResult.data.collection.handle || sourceHandle;
 
       const validDestStores = await prisma.connectedStore.findMany({
         where: { id: { in: destinations.map((d) => d.destStoreId) }, ownerShop },
         select: { id: true },
       });
       const validDestIds = new Set(validDestStores.map((s) => s.id));
+      if (!validDestIds.size) {
+        return json({ error: "Selected destination store was not found for this account" }, { status: 400 });
+      }
 
       for (const dest of destinations) {
         if (!validDestIds.has(dest.destStoreId)) continue;
