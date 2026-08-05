@@ -281,6 +281,16 @@ export async function syncInventoryItem(
         inventoryItem(id: $id) {
           id
           tracked
+          inventoryLevels(first: 50) {
+            edges {
+              node {
+                quantities(names: ["available"]) {
+                  name
+                  quantity
+                }
+              }
+            }
+          }
           variants(first: 10) {
             edges {
               node {
@@ -337,7 +347,9 @@ export async function syncInventoryItem(
     const error = await setDestinationInventoryQuantity(
       destClient,
       variantMap.destVariantGid,
-      available
+      sourceInventoryItem.inventoryLevels?.edges?.length
+        ? availableQuantityFromLevels(sourceInventoryItem.inventoryLevels.edges)
+        : available
     );
 
     return {

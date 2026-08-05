@@ -291,7 +291,12 @@ export async function handleInventoryWebhook(
     },
   });
 
-  if (!syncRules.length) return;
+  if (!syncRules.length) {
+    console.log(
+      `[SyncEngine] Inventory webhook for ${inventoryItemId} from ${shopDomain} had no active realtime inventory sync rules`
+    );
+    return;
+  }
 
   for (const rule of syncRules) {
     try {
@@ -304,6 +309,10 @@ export async function handleInventoryWebhook(
         available,
         sourceClient,
         destClient
+      );
+
+      console.log(
+        `[SyncEngine] Inventory webhook ${inventoryItemId} -> ${rule.destStore.shopDomain}: ${result.success ? "SUCCESS" : "FAILED"} ${result.error || ""}`
       );
 
       await prisma.syncLog.create({
