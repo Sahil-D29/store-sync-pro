@@ -997,42 +997,62 @@ export async function fetchAllCollections(
   sourceClient: ShopifyGraphQLClient,
   searchQuery?: string
 ): Promise<Array<{ id: string; title: string; handle: string }>> {
-  const collections: Array<{ id: string; title: string; handle: string }> = [];
-  let hasNext = true;
-  let cursor: string | null = null;
-  const query = searchQuery?.trim() || undefined;
+  const byId = new Map<string, { id: string; title: string; handle: string }>();
+  const errors: string[] = [];
+  const rawQuery = searchQuery?.trim();
+  const handleQuery = rawQuery?.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, "");
+  const queryVariants = rawQuery
+    ? [
+        rawQuery,
+        `title:${rawQuery}*`,
+        handleQuery ? `handle:${handleQuery}*` : null,
+        `collection_type:smart title:${rawQuery}*`,
+        `collection_type:custom title:${rawQuery}*`,
+      ].filter(Boolean) as string[]
+    : [undefined];
 
-  while (hasNext) {
-    const result: any = await sourceClient.queryWithRetry(GET_COLLECTIONS, {
-      first: 50,
-      after: cursor,
-      query,
-    });
+  for (const query of queryVariants) {
+    let hasNext = true;
+    let cursor: string | null = null;
 
-    if (result.errors?.length) {
-      throw new Error(
-        `Failed to fetch collections: ${result.errors
-          .map((error: { message: string }) => error.message)
-          .join("; ")}`
-      );
-    }
-
-    const data = result.data?.collections;
-    if (!data) break;
-
-    for (const edge of data.edges) {
-      collections.push({
-        id: edge.node.id,
-        title: edge.node.title,
-        handle: edge.node.handle,
+    while (hasNext) {
+      const result: any = await sourceClient.queryWithRetry(GET_COLLECTIONS, {
+        first: 50,
+        after: cursor,
+        query,
       });
-    }
 
-    hasNext = data.pageInfo.hasNextPage;
-    cursor = data.pageInfo.endCursor;
+      if (result.errors?.length) {
+        errors.push(
+          `${query || "all collections"}: ${result.errors
+            .map((error: { message: string }) => error.message)
+            .join("; ")}`
+        );
+        break;
+      }
+
+      const data = result.data?.collections;
+      if (!data) break;
+
+      for (const edge of data.edges) {
+        byId.set(edge.node.id, {
+          id: edge.node.id,
+          title: edge.node.title,
+          handle: edge.node.handle,
+        });
+      }
+
+      hasNext = data.pageInfo.hasNextPage;
+      cursor = data.pageInfo.endCursor;
+    }
   }
 
-  return collections;
+  const collections = [...byId.values()];
+  if (collections.length === 0 && errors.length > 0) {
+    throw new Error(`Failed to fetch collections: ${errors.join(" | ")}`);
+  }
+
+  return collections.sort((a, b) => a.title.localeCompare(b.title));
 }
 
 /**
