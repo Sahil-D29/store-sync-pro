@@ -7,6 +7,13 @@ import { syncCollection, deleteCollectionOnDestination } from "./collection-sync
 import { syncInventoryItem } from "./inventory-sync.server";
 import { syncProductExtras } from "./product-extras.server";
 
+const COLLECTION_PRODUCT_WEBHOOK_COOLDOWN_MS = 15_000;
+const collectionMappingSyncsInFlight = new Set<string>();
+
+function topicIsDelete(topic: string) {
+  return topic.toLowerCase().includes("delete");
+}
+
 /**
  * Handle a product webhook (create/update/delete) from the source store
  */
@@ -30,8 +37,6 @@ export async function handleProductWebhook(
     },
   });
 
-  if (!syncRules.length) return;
-
   for (const rule of syncRules) {
     // Check if product matches filters
     const matches = await matchesFilter(rule, productGid);
@@ -43,7 +48,7 @@ export async function handleProductWebhook(
 
       let result;
 
-      if (topic.includes("delete")) {
+      if (topicIsDelete(topic)) {
         result = await deleteProductOnDestination(
           rule as SyncRuleWithRelations,
           productGid,
@@ -111,6 +116,87 @@ export async function handleProductWebhook(
       });
     }
   }
+
+  await handleCollectionMappingsForProductWebhook(topic, shopDomain, productGid);
+}
+
+async function handleCollectionMappingsForProductWebhook(
+  topic: string,
+  shopDomain: string,
+  productGid: string
+): Promise<void> {
+  const mappings = await prisma.collectionMapping.findMany({
+    where: {
+      sourceStore: { shopDomain },
+      triggerMode: "REALTIME",
+    },
+    include: { sourceStore: true, destStore: true },
+  });
+
+  if (!mappings.length) return;
+
+  console.log(
+    `[SyncEngine] Product webhook ${topic} for ${productGid} will refresh ${mappings.length} realtime collection mapping(s)`
+  );
+
+  for (const mapping of mappings) {
+    const recentlySynced =
+      mapping.lastSyncedAt &&
+      Date.now() - mapping.lastSyncedAt.getTime() < COLLECTION_PRODUCT_WEBHOOK_COOLDOWN_MS;
+
+    if (recentlySynced && !topicIsDelete(topic)) {
+      console.log(
+        `[SyncEngine] Skipping realtime collection mapping ${mapping.id}; synced recently`
+      );
+      continue;
+    }
+
+    if (collectionMappingSyncsInFlight.has(mapping.id)) {
+      console.log(
+        `[SyncEngine] Skipping realtime collection mapping ${mapping.id}; sync already in flight`
+      );
+      continue;
+    }
+
+    collectionMappingSyncsInFlight.add(mapping.id);
+
+    try {
+      const sourceClient = await createClientForStore(mapping.sourceStoreId);
+      const destClient = await createClientForStore(mapping.destStoreId);
+      const result = await syncCollection(mapping, sourceClient, destClient);
+
+      await prisma.syncLog.create({
+        data: {
+          storeId: mapping.destStoreId,
+          action: result.action,
+          resourceType: "COLLECTION",
+          sourceGid: result.sourceGid,
+          destGid: result.destGid,
+          status: result.success ? "SUCCESS" : "FAILED",
+          trigger: "WEBHOOK",
+          message: result.success
+            ? `Collection ${result.action.toLowerCase()} after product webhook`
+            : undefined,
+          errorDetail: result.error,
+          duration: result.duration,
+        },
+      });
+    } catch (error) {
+      await prisma.syncLog.create({
+        data: {
+          storeId: mapping.destStoreId,
+          action: "UPDATE",
+          resourceType: "COLLECTION",
+          sourceGid: mapping.sourceCollectionGid,
+          status: "FAILED",
+          trigger: "WEBHOOK",
+          errorDetail: (error as Error).message,
+        },
+      });
+    } finally {
+      collectionMappingSyncsInFlight.delete(mapping.id);
+    }
+  }
 }
 
 /**
@@ -144,7 +230,7 @@ export async function handleCollectionWebhook(
 
       let result;
 
-      if (topic.includes("delete")) {
+      if (topicIsDelete(topic)) {
         result = await deleteCollectionOnDestination(mapping, destClient);
       } else {
         result = await syncCollection(mapping, sourceClient, destClient);
@@ -170,7 +256,7 @@ export async function handleCollectionWebhook(
       await prisma.syncLog.create({
         data: {
           storeId: mapping.destStoreId,
-          action: topic.includes("delete") ? "DELETE" : "UPDATE",
+          action: topicIsDelete(topic) ? "DELETE" : "UPDATE",
           resourceType: "COLLECTION",
           sourceGid: collectionGid,
           status: "FAILED",
