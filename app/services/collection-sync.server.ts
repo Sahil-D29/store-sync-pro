@@ -9,6 +9,7 @@ import {
 import {
   COLLECTION_CREATE_MUTATION,
   COLLECTION_UPDATE_MUTATION,
+  COLLECTION_UPDATE_DETAILS_MUTATION,
   COLLECTION_ADD_PRODUCTS_MUTATION,
   COLLECTION_REMOVE_PRODUCTS_MUTATION,
   COLLECTION_REORDER_PRODUCTS_MUTATION,
@@ -521,10 +522,15 @@ export async function syncCollection(
       collectionInput.id = mapping.destCollectionGid;
       destCollectionGid = mapping.destCollectionGid!;
 
-      const updateResult = await destClient.queryWithRetry(
-        COLLECTION_UPDATE_MUTATION,
-        { input: collectionInput }
-      );
+      const updateResult = sourceCollection.ruleSet
+        ? await destClient.queryWithRetry(
+            COLLECTION_UPDATE_MUTATION,
+            { input: collectionInput }
+          )
+        : await destClient.queryWithRetry(
+            COLLECTION_UPDATE_DETAILS_MUTATION,
+            { collection: collectionInput }
+          );
 
       if (updateResult.data?.collectionUpdate?.userErrors?.length) {
         return {

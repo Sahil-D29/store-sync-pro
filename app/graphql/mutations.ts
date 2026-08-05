@@ -56,6 +56,23 @@ export const COLLECTION_UPDATE_MUTATION = `#graphql
   }
 `;
 
+export const COLLECTION_UPDATE_DETAILS_MUTATION = `#graphql
+  mutation CollectionUpdateDetails($collection: CollectionUpdateInput!) {
+    collectionUpdate(collection: $collection) {
+      collection {
+        id
+        title
+        handle
+        sortOrder
+      }
+      userErrors {
+        field
+        message
+      }
+    }
+  }
+`;
+
 export const COLLECTION_ADD_PRODUCTS_MUTATION = `#graphql
   mutation CollectionAddProducts($id: ID!, $productIds: [ID!]!) {
     collectionAddProductsV2(id: $id, productIds: $productIds) {
