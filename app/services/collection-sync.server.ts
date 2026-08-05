@@ -994,17 +994,28 @@ export async function deleteCollectionOnDestination(
  * Fetch all collection GIDs from source store
  */
 export async function fetchAllCollections(
-  sourceClient: ShopifyGraphQLClient
+  sourceClient: ShopifyGraphQLClient,
+  searchQuery?: string
 ): Promise<Array<{ id: string; title: string; handle: string }>> {
   const collections: Array<{ id: string; title: string; handle: string }> = [];
   let hasNext = true;
   let cursor: string | null = null;
+  const query = searchQuery?.trim() || undefined;
 
   while (hasNext) {
     const result: any = await sourceClient.queryWithRetry(GET_COLLECTIONS, {
       first: 50,
       after: cursor,
+      query,
     });
+
+    if (result.errors?.length) {
+      throw new Error(
+        `Failed to fetch collections: ${result.errors
+          .map((error: { message: string }) => error.message)
+          .join("; ")}`
+      );
+    }
 
     const data = result.data?.collections;
     if (!data) break;

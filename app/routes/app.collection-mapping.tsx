@@ -531,10 +531,15 @@ export default function CollectionMappingPage() {
 
   useEffect(() => {
     if (sourceStore?.id) {
-      sourceCollectionsFetcher.load(`/api/store-collections/${sourceStore.id}`);
+      const params = new URLSearchParams();
+      if (sourceQuery.trim()) params.set("q", sourceQuery.trim());
+      const search = params.toString();
+      sourceCollectionsFetcher.load(
+        `/api/store-collections/${sourceStore.id}${search ? `?${search}` : ""}`
+      );
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [sourceStore?.id]);
+  }, [sourceStore?.id, sourceQuery]);
 
   const sourceCollectionOptions = useMemo(() => {
     const all = sourceCollectionsFetcher.data?.collections || [];

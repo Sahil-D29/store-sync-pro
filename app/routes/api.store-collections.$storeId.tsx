@@ -15,6 +15,8 @@ import { fetchAllCollections } from "../services/collection-sync.server";
  */
 export async function loader({ request, params }: LoaderFunctionArgs) {
   const { session } = await authenticate.admin(request);
+  const url = new URL(request.url);
+  const query = url.searchParams.get("q") || undefined;
 
   const { storeId } = params;
   if (!storeId) return json({ error: "Missing storeId" }, { status: 400 });
@@ -32,7 +34,7 @@ export async function loader({ request, params }: LoaderFunctionArgs) {
 
   try {
     const client = await createClientForStore(storeId);
-    const collections = await fetchAllCollections(client);
+    const collections = await fetchAllCollections(client, query);
     return json({ collections });
   } catch (error) {
     return json(

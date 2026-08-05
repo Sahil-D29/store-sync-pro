@@ -102,8 +102,8 @@ export const GET_PRODUCTS_PAGINATED = `#graphql
 `;
 
 export const GET_COLLECTIONS = `#graphql
-  query GetCollections($first: Int!, $after: String) {
-    collections(first: $first, after: $after) {
+  query GetCollections($first: Int!, $after: String, $query: String) {
+    collections(first: $first, after: $after, query: $query) {
       edges {
         node {
           id
