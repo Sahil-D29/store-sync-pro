@@ -555,6 +555,28 @@ export default function CollectionMappingPage() {
     }));
   }, [sourceCollectionsFetcher.data, sourceQuery]);
 
+  const openSourceCollectionPicker = useCallback(async () => {
+    try {
+      const selected = await (window as any).shopify.resourcePicker({
+        type: "collection",
+        action: "select",
+        multiple: false,
+        selectionIds: sourceCollection ? [{ id: sourceCollection.id }] : [],
+      });
+
+      if (selected?.length) {
+        setSourceCollection({
+          id: selected[0].id,
+          title: selected[0].title,
+          handle: selected[0].handle,
+        });
+        setSourceQuery(selected[0].title);
+      }
+    } catch (error) {
+      console.error("Collection picker error:", error);
+    }
+  }, [sourceCollection]);
+
   const handleCreateMapping = () => {
     if (!chosenEntries.length || !sourceCollection || hasIncompleteExisting) return;
     const fd = new FormData();
@@ -778,36 +800,43 @@ export default function CollectionMappingPage() {
                 <Text as="p" variant="bodyMd" fontWeight="medium">
                   Source collection
                 </Text>
-                <Autocomplete
-                  options={sourceCollectionOptions}
-                  selected={sourceCollection ? [sourceCollection.id] : []}
-                  onSelect={(selected) => {
-                    const id = selected[0];
-                    const match = sourceCollectionsFetcher.data?.collections.find((collection) => collection.id === id);
-                    if (match) {
-                      setSourceCollection(match);
-                      setSourceQuery(match.title);
-                    }
-                  }}
-                  loading={sourceCollectionsFetcher.state === "loading"}
-                  textField={
-                    <Autocomplete.TextField
-                      label=""
-                      labelHidden
-                      value={sourceCollection ? sourceCollection.title : sourceQuery}
-                      onChange={(value) => {
-                        setSourceQuery(value);
-                        if (sourceCollection) setSourceCollection(null);
+                <InlineStack gap="200" blockAlign="start">
+                  <div style={{ flex: 1 }}>
+                    <Autocomplete
+                      options={sourceCollectionOptions}
+                      selected={sourceCollection ? [sourceCollection.id] : []}
+                      onSelect={(selected) => {
+                        const id = selected[0];
+                        const match = sourceCollectionsFetcher.data?.collections.find((collection) => collection.id === id);
+                        if (match) {
+                          setSourceCollection(match);
+                          setSourceQuery(match.title);
+                        }
                       }}
-                      placeholder={
-                        sourceStore
-                          ? `Search ${sourceStore.shopName || sourceStore.shopDomain} collections`
-                          : "Source store not connected"
+                      loading={sourceCollectionsFetcher.state === "loading"}
+                      textField={
+                        <Autocomplete.TextField
+                          label=""
+                          labelHidden
+                          value={sourceCollection ? sourceCollection.title : sourceQuery}
+                          onChange={(value) => {
+                            setSourceQuery(value);
+                            if (sourceCollection) setSourceCollection(null);
+                          }}
+                          placeholder={
+                            sourceStore
+                              ? `Search ${sourceStore.shopName || sourceStore.shopDomain} collections`
+                              : "Source store not connected"
+                          }
+                          autoComplete="off"
+                        />
                       }
-                      autoComplete="off"
                     />
-                  }
-                />
+                  </div>
+                  <Button onClick={openSourceCollectionPicker}>
+                    Browse Shopify
+                  </Button>
+                </InlineStack>
                 {sourceCollectionsFetcher.data?.error && (
                   <Text as="p" variant="bodySm" tone="critical">
                     {sourceCollectionsFetcher.data.error}
