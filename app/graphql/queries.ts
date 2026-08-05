@@ -141,9 +141,9 @@ export const GET_COLLECTIONS = `#graphql
 `;
 
 export const GET_COLLECTION_PRODUCTS = `#graphql
-  query GetCollectionProducts($id: ID!, $first: Int!, $after: String) {
+  query GetCollectionProducts($id: ID!, $first: Int!, $after: String, $sortKey: ProductCollectionSortKeys) {
     collection(id: $id) {
-      products(first: $first, after: $after) {
+      products(first: $first, after: $after, sortKey: $sortKey) {
         edges {
           node {
             id

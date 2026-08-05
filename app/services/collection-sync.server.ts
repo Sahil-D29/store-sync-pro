@@ -45,6 +45,13 @@ type SourceCollectionData = {
   } | null;
 };
 
+type PublicCollectionData = {
+  baseUrl: string;
+  title: string;
+  handle: string;
+  productsCount: number | null;
+};
+
 interface SyncCollectionResult {
   success: boolean;
   action: "CREATE" | "UPDATE" | "DELETE" | "SKIP";
@@ -155,6 +162,130 @@ function fallbackCollectionData(mapping: CollectionMappingWithStores): SourceCol
     seo: null,
     ruleSet: null,
   };
+}
+
+function normalizeText(value: string | null | undefined) {
+  return (value || "").trim().toLowerCase();
+}
+
+function slugifyHandle(value: string | null | undefined) {
+  const slug = normalizeText(value)
+    .replace(/[^a-z0-9]+/g, "-")
+    .replace(/^-+|-+$/g, "");
+  return slug || "";
+}
+
+function uniqueStrings(values: Array<string | null | undefined>) {
+  return [...new Set(values.map((value) => value?.trim()).filter(Boolean) as string[])];
+}
+
+function joinUrl(baseUrl: string, path: string) {
+  return `${baseUrl.replace(/\/+$/, "")}/${path.replace(/^\/+/, "")}`;
+}
+
+async function fetchPrimaryDomainUrl(
+  sourceClient: ShopifyGraphQLClient,
+  fallbackShopDomain: string
+): Promise<string[]> {
+  const urls: string[] = [];
+
+  try {
+    const result: any = await sourceClient.queryWithRetry(
+      `#graphql
+      query GetShopPrimaryDomain {
+        shop {
+          primaryDomain {
+            url
+          }
+        }
+      }`
+    );
+    const primaryUrl = result.data?.shop?.primaryDomain?.url;
+    if (primaryUrl) urls.push(primaryUrl);
+  } catch (error) {
+    console.warn(
+      `[CollectionSync] Could not fetch primary domain for ${fallbackShopDomain}:`,
+      (error as Error).message
+    );
+  }
+
+  urls.push(`https://${fallbackShopDomain}`);
+  return uniqueStrings(urls).map((url) => url.replace(/\/+$/, ""));
+}
+
+async function fetchPublicJson<T>(url: string): Promise<T | null> {
+  try {
+    const response = await fetch(url, {
+      headers: {
+        Accept: "application/json",
+        "User-Agent": "DorecStoreSync/1.0",
+      },
+    });
+    if (!response.ok) return null;
+    return (await response.json()) as T;
+  } catch {
+    return null;
+  }
+}
+
+async function findPublicCollectionData(
+  mapping: CollectionMappingWithStores,
+  sourceClient: ShopifyGraphQLClient,
+  sourceTitle?: string | null
+): Promise<PublicCollectionData | null> {
+  const desiredTitles = uniqueStrings([
+    sourceTitle,
+    mapping.destTitle,
+    mapping.sourceHandle,
+  ]).map(normalizeText);
+  const desiredHandles = uniqueStrings([
+    mapping.sourceHandle,
+    slugifyHandle(sourceTitle),
+    slugifyHandle(mapping.destTitle),
+  ]).map(normalizeText);
+
+  if (!desiredTitles.length && !desiredHandles.length) return null;
+
+  const baseUrls = await fetchPrimaryDomainUrl(
+    sourceClient,
+    mapping.sourceStore.shopDomain
+  );
+
+  for (const baseUrl of baseUrls) {
+    for (let page = 1; page <= 10; page++) {
+      const url = joinUrl(baseUrl, `/collections.json?limit=250&page=${page}`);
+      const result = await fetchPublicJson<{
+        collections?: Array<{
+          title?: string;
+          handle?: string;
+          products_count?: number;
+        }>;
+      }>(url);
+      const collections = result?.collections || [];
+      if (!collections.length) break;
+
+      const match = collections.find((collection) => {
+        const title = normalizeText(collection.title);
+        const handle = normalizeText(collection.handle);
+        return (
+          (title && desiredTitles.includes(title)) ||
+          (handle && desiredHandles.includes(handle))
+        );
+      });
+
+      if (match?.handle && match.title) {
+        return {
+          baseUrl,
+          title: match.title,
+          handle: match.handle,
+          productsCount:
+            typeof match.products_count === "number" ? match.products_count : null,
+        };
+      }
+    }
+  }
+
+  return null;
 }
 
 async function fetchRestCollectionData(
@@ -398,6 +529,28 @@ async function fetchSourceCollectionData(
   const restCollection = await fetchRestCollectionData(mapping, sourceClient);
   if (restCollection) return restCollection;
 
+  const publicCollection = await findPublicCollectionData(
+    mapping,
+    sourceClient,
+    mapping.destTitle
+  );
+  if (publicCollection) {
+    console.warn(
+      `[CollectionSync] Using public storefront collection fallback for ${mapping.sourceCollectionGid} on ${mapping.sourceStore.shopDomain}: ${publicCollection.handle}`
+    );
+    return {
+      id: mapping.sourceCollectionGid,
+      title: publicCollection.title,
+      handle: publicCollection.handle,
+      descriptionHtml: null,
+      sortOrder: "MANUAL",
+      templateSuffix: null,
+      image: null,
+      seo: null,
+      ruleSet: null,
+    };
+  }
+
   console.warn(
     `[CollectionSync] Collection ${mapping.sourceCollectionGid} metadata was not visible on ${mapping.sourceStore.shopDomain}; continuing with minimal collection data so product fallback can run (${lookupDetails})`
   );
@@ -421,18 +574,25 @@ export async function syncCollection(
       mapping,
       sourceClient
     );
+    const hasUpdatedSourceId =
+      sourceCollection.id && sourceCollection.id !== mapping.sourceCollectionGid;
+    const hasUpdatedSourceHandle =
+      sourceCollection.handle && sourceCollection.handle !== mapping.sourceHandle;
     const effectiveMapping =
-      sourceCollection.id && sourceCollection.id !== mapping.sourceCollectionGid
+      hasUpdatedSourceId || hasUpdatedSourceHandle
         ? {
             ...mapping,
-            sourceCollectionGid: sourceCollection.id,
+            sourceCollectionGid: sourceCollection.id || mapping.sourceCollectionGid,
             sourceHandle: sourceCollection.handle || mapping.sourceHandle,
           }
         : mapping;
 
     sourceCollectionGid = effectiveMapping.sourceCollectionGid;
 
-    if (effectiveMapping.sourceCollectionGid !== mapping.sourceCollectionGid) {
+    if (
+      effectiveMapping.sourceCollectionGid !== mapping.sourceCollectionGid ||
+      effectiveMapping.sourceHandle !== mapping.sourceHandle
+    ) {
       await prisma.collectionMapping
         .update({
           where: { id: mapping.id },
@@ -556,7 +716,7 @@ export async function syncCollection(
       await syncCollectionProducts(
         effectiveMapping,
         destCollectionGid,
-        sourceCollection.sortOrder,
+        sourceCollection,
         sourceClient,
         destClient,
         runStats
@@ -604,18 +764,18 @@ export async function syncCollection(
 async function syncCollectionProducts(
   mapping: CollectionMappingWithStores,
   destCollectionGid: string,
-  sortOrder: string | null | undefined,
+  sourceCollection: SourceCollectionData,
   sourceClient: ShopifyGraphQLClient,
   destClient: ShopifyGraphQLClient,
   runStats?: CollectionSyncRunStats
 ): Promise<void> {
-  const sourceCollectionGid = mapping.sourceCollectionGid;
   const { sourceStoreId, destStoreId } = mapping;
 
   // Fetch all product IDs in the source collection, in collection order.
-  const sourceProductGids = await fetchCollectionProductGids(
+  const sourceProductGids = await fetchSourceCollectionProductGids(
     sourceClient,
-    sourceCollectionGid
+    mapping,
+    sourceCollection
   );
   if (runStats) {
     runStats.totalProducts = sourceProductGids.length;
@@ -829,7 +989,7 @@ async function syncCollectionProducts(
 
   // Preserve the exact manual order. Reorder is only meaningful (and only
   // permitted) when the collection uses MANUAL sort order.
-  if (sortOrder === "MANUAL" && desiredDestIds.length) {
+  if (sourceCollection.sortOrder === "MANUAL" && desiredDestIds.length) {
     const moves = desiredDestIds.map((id, index) => ({
       id,
       newPosition: String(index),
@@ -997,6 +1157,19 @@ async function fetchCollectionProductGids(
   client: ShopifyGraphQLClient,
   collectionGid: string
 ): Promise<string[]> {
+  const directGids = await fetchCollectionProductGidsByConnection(client, collectionGid);
+  if (directGids) return directGids;
+
+  console.warn(
+    `[CollectionSync] Collection ${collectionGid} is not visible via collection(id:); falling back to products collection_id search`
+  );
+  return fetchProductGidsByCollectionId(client, collectionGid);
+}
+
+async function fetchCollectionProductGidsByConnection(
+  client: ShopifyGraphQLClient,
+  collectionGid: string
+): Promise<string[] | null> {
   const gids: string[] = [];
   let hasNext = true;
   let cursor: string | null = null;
@@ -1006,6 +1179,7 @@ async function fetchCollectionProductGids(
       id: collectionGid,
       first: 100,
       after: cursor,
+      sortKey: "COLLECTION_DEFAULT",
     });
 
     if (result.errors?.length) {
@@ -1018,10 +1192,7 @@ async function fetchCollectionProductGids(
 
     const collection = result.data?.collection;
     if (!collection) {
-      console.warn(
-        `[CollectionSync] Collection ${collectionGid} is not visible via collection(id:); falling back to products collection_id search`
-      );
-      return fetchProductGidsByCollectionId(client, collectionGid);
+      return null;
     }
 
     const products = collection.products;
@@ -1033,6 +1204,109 @@ async function fetchCollectionProductGids(
 
     hasNext = products.pageInfo.hasNextPage;
     cursor = products.pageInfo.endCursor;
+  }
+
+  return gids;
+}
+
+async function fetchSourceCollectionProductGids(
+  sourceClient: ShopifyGraphQLClient,
+  mapping: CollectionMappingWithStores,
+  sourceCollection: SourceCollectionData
+): Promise<string[]> {
+  const directGids = await fetchCollectionProductGidsByConnection(
+    sourceClient,
+    mapping.sourceCollectionGid
+  );
+  if (directGids) return directGids;
+
+  const publicGids = await fetchPublicCollectionProductGids(
+    sourceClient,
+    mapping,
+    sourceCollection
+  );
+
+  if (publicGids.length) {
+    const fallbackGids = await fetchProductGidsByCollectionId(
+      sourceClient,
+      mapping.sourceCollectionGid
+    );
+    const seen = new Set(publicGids);
+    const combined = [
+      ...publicGids,
+      ...fallbackGids.filter((gid) => !seen.has(gid)),
+    ];
+    console.log(
+      `[CollectionSync] public collection order fallback: ${publicGids.length} ordered products from ${sourceCollection.handle}; ${combined.length} total after appending hidden products`
+    );
+    return combined;
+  }
+
+  console.warn(
+    `[CollectionSync] Collection ${mapping.sourceCollectionGid} is not visible via collection(id:) and no public collection order was found; falling back to products collection_id search`
+  );
+  return fetchProductGidsByCollectionId(sourceClient, mapping.sourceCollectionGid);
+}
+
+async function fetchPublicCollectionProductGids(
+  sourceClient: ShopifyGraphQLClient,
+  mapping: CollectionMappingWithStores,
+  sourceCollection: SourceCollectionData
+): Promise<string[]> {
+  const publicCollection =
+    sourceCollection.handle
+      ? {
+          baseUrl: (
+            await fetchPrimaryDomainUrl(sourceClient, mapping.sourceStore.shopDomain)
+          )[0],
+          title: sourceCollection.title,
+          handle: sourceCollection.handle,
+          productsCount: null,
+        }
+      : await findPublicCollectionData(
+          mapping,
+          sourceClient,
+          sourceCollection.title
+        );
+
+  if (!publicCollection?.handle) return [];
+
+  const gids: string[] = [];
+  const seen = new Set<string>();
+
+  for (let page = 1; page <= 20; page++) {
+    const url = joinUrl(
+      publicCollection.baseUrl,
+      `/collections/${encodeURIComponent(publicCollection.handle)}/products.json?limit=250&page=${page}`
+    );
+    const result = await fetchPublicJson<{
+      products?: Array<{ id?: number | string }>;
+    }>(url);
+    const products = result?.products || [];
+    if (!products.length) break;
+
+    for (const product of products) {
+      if (product.id == null) continue;
+      const gid = `gid://shopify/Product/${product.id}`;
+      if (!seen.has(gid)) {
+        gids.push(gid);
+        seen.add(gid);
+      }
+    }
+  }
+
+  if (gids.length && publicCollection.handle !== mapping.sourceHandle) {
+    await prisma.collectionMapping
+      .update({
+        where: { id: mapping.id },
+        data: { sourceHandle: publicCollection.handle },
+      })
+      .catch((error) =>
+        console.warn(
+          `[CollectionSync] Could not update mapping ${mapping.id} with public handle ${publicCollection.handle}:`,
+          error
+        )
+      );
   }
 
   return gids;
