@@ -5,7 +5,11 @@ import {
   INVENTORY_ITEM_UPDATE_MUTATION,
   INVENTORY_SET_QUANTITIES_MUTATION,
 } from "../graphql/mutations";
-import type { SyncRuleWithRelations } from "./product-sync.server";
+
+interface InventorySyncScope {
+  sourceStoreId: string;
+  destStoreId: string;
+}
 
 interface SyncInventoryResult {
   success: boolean;
@@ -149,7 +153,7 @@ async function setDestinationInventoryQuantity(
  * Sync inventory for a product's variants from source to destination.
  */
 export async function syncProductInventory(
-  syncRule: SyncRuleWithRelations,
+  syncRule: InventorySyncScope,
   sourceProductGid: string,
   sourceClient: ShopifyGraphQLClient,
   destClient: ShopifyGraphQLClient
@@ -222,9 +226,10 @@ export async function syncProductInventory(
 
     if (!sourceVariant.inventoryItem?.tracked) {
       results.push({
-        success: true,
+        success: false,
         action: "SKIP",
         sourceGid: sourceVariant.id,
+        error: "Source inventory item is not tracked",
         duration: Date.now() - startTime,
       });
       continue;
@@ -266,7 +271,7 @@ export async function syncProductInventory(
  * Sync inventory for a single inventory item from an inventory webhook.
  */
 export async function syncInventoryItem(
-  syncRule: SyncRuleWithRelations,
+  syncRule: InventorySyncScope,
   inventoryItemId: string,
   available: number,
   sourceClient: ShopifyGraphQLClient,
@@ -313,9 +318,12 @@ export async function syncInventoryItem(
 
     if (!sourceInventoryItem?.tracked || !sourceVariant?.id || !sourceProductGid) {
       return {
-        success: true,
+        success: false,
         action: "SKIP",
         sourceGid: inventoryItemId,
+        error: !sourceInventoryItem?.tracked
+          ? "Source inventory item is not tracked"
+          : "Source variant/product not found for inventory item",
         duration: Date.now() - startTime,
       };
     }

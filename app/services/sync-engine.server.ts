@@ -291,14 +291,36 @@ export async function handleInventoryWebhook(
     },
   });
 
-  if (!syncRules.length) {
+  const collectionMappings = await prisma.collectionMapping.findMany({
+    where: {
+      sourceStore: { shopDomain },
+      triggerMode: "REALTIME",
+      createSyncInventory: true,
+    },
+    include: {
+      sourceStore: true,
+      destStore: true,
+    },
+  });
+
+  const handledStorePairs = new Set<string>();
+  const collectionMappingsToSync = collectionMappings.filter((mapping) => {
+    const key = `${mapping.sourceStoreId}:${mapping.destStoreId}`;
+    if (handledStorePairs.has(key)) return false;
+    handledStorePairs.add(key);
+    return true;
+  });
+
+  if (!syncRules.length && !collectionMappingsToSync.length) {
     console.log(
-      `[SyncEngine] Inventory webhook for ${inventoryItemId} from ${shopDomain} had no active realtime inventory sync rules`
+      `[SyncEngine] Inventory webhook for ${inventoryItemId} from ${shopDomain} had no active realtime inventory sync rules or collection mappings`
     );
     return;
   }
 
   for (const rule of syncRules) {
+    handledStorePairs.add(`${rule.sourceStoreId}:${rule.destStoreId}`);
+
     try {
       const sourceClient = await createClientForStore(rule.sourceStoreId);
       const destClient = await createClientForStore(rule.destStoreId);
@@ -336,6 +358,58 @@ export async function handleInventoryWebhook(
         data: {
           syncRuleId: rule.id,
           storeId: rule.destStoreId,
+          action: "UPDATE",
+          resourceType: "INVENTORY",
+          sourceGid: inventoryItemId,
+          status: "FAILED",
+          trigger: "WEBHOOK",
+          errorDetail: (error as Error).message,
+        },
+      });
+    }
+  }
+
+  for (const mapping of collectionMappingsToSync) {
+    const key = `${mapping.sourceStoreId}:${mapping.destStoreId}`;
+    if (syncRules.some((rule) => `${rule.sourceStoreId}:${rule.destStoreId}` === key)) {
+      continue;
+    }
+
+    try {
+      const sourceClient = await createClientForStore(mapping.sourceStoreId);
+      const destClient = await createClientForStore(mapping.destStoreId);
+
+      const result = await syncInventoryItem(
+        mapping,
+        inventoryItemId,
+        available,
+        sourceClient,
+        destClient
+      );
+
+      console.log(
+        `[SyncEngine] Inventory webhook ${inventoryItemId} -> ${mapping.destStore.shopDomain} via collection mapping: ${result.success ? "SUCCESS" : "FAILED"} ${result.error || ""}`
+      );
+
+      await prisma.syncLog.create({
+        data: {
+          storeId: mapping.destStoreId,
+          action: result.action,
+          resourceType: "INVENTORY",
+          sourceGid: result.sourceGid,
+          status: result.success ? "SUCCESS" : "FAILED",
+          trigger: "WEBHOOK",
+          message: result.success
+            ? `Inventory ${result.action.toLowerCase()} via collection mapping`
+            : undefined,
+          errorDetail: result.error,
+          duration: result.duration,
+        },
+      });
+    } catch (error) {
+      await prisma.syncLog.create({
+        data: {
+          storeId: mapping.destStoreId,
           action: "UPDATE",
           resourceType: "INVENTORY",
           sourceGid: inventoryItemId,
