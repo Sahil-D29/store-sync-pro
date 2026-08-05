@@ -741,7 +741,7 @@ export default function CollectionMappingPage() {
             tone={job.status === "COMPLETED" ? "success" : job.status === "FAILED" ? "critical" : "highlight"}
           />
           <Text as="span" variant="bodySm" tone={job.failed > 0 || job.status === "FAILED" ? "critical" : "subdued"}>
-            {job.status === "RUNNING"
+            Latest run: {job.status === "RUNNING"
               ? `Syncing... ${processed}/${job.total} products`
               : job.status === "COMPLETED"
                 ? `Done! ${job.synced} synced${job.skipped ? `, ${job.skipped} skipped` : ""}`

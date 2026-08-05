@@ -1,3 +1,4 @@
+import { randomUUID } from "crypto";
 import prisma from "../db.server";
 import type { ShopifyGraphQLClient } from "./shopify-client.server";
 import {
@@ -300,6 +301,7 @@ async function ensureInventoryTracked(
     id: inventoryItemId,
     input: { tracked: true },
   });
+  if (result.errors?.length) return result.errors[0].message;
   const errors = result.data?.inventoryItemUpdate?.userErrors;
   return errors?.length ? errors[0].message : null;
 }
@@ -327,6 +329,9 @@ async function setDestinationInventoryQuantity(
     }`,
     { id: destVariantGid, locationId: destLocationId }
   );
+  if (destVariantResult.errors?.length) {
+    return destVariantResult.errors[0].message;
+  }
 
   const destInventoryItem =
     destVariantResult.data?.productVariant?.inventoryItem;
@@ -349,6 +354,7 @@ async function setDestinationInventoryQuantity(
         available: quantity,
       }
     );
+    if (activateResult.errors?.length) return activateResult.errors[0].message;
     const errors = activateResult.data?.inventoryActivate?.userErrors;
     return errors?.length ? errors[0].message : null;
   }
@@ -360,6 +366,7 @@ async function setDestinationInventoryQuantity(
         reason: "correction",
         name: "available",
         ignoreCompareQuantity: true,
+        referenceDocumentUri: `dorec-store-sync://inventory-sync/${randomUUID()}`,
         quantities: [
           {
             inventoryItemId: destInventoryItemId,
@@ -368,11 +375,41 @@ async function setDestinationInventoryQuantity(
           },
         ],
       },
+      idempotencyKey: randomUUID(),
     }
   );
 
+  if (setResult.errors?.length) return setResult.errors[0].message;
+
   const errors = setResult.data?.inventorySetQuantities?.userErrors;
-  return errors?.length ? errors[0].message : null;
+  if (errors?.length) return errors[0].message;
+
+  const verifyResult = await destClient.queryWithRetry(
+    `#graphql
+    query VerifyInventoryQuantity($inventoryItemId: ID!, $locationId: ID!) {
+      inventoryItem(id: $inventoryItemId) {
+        inventoryLevel(locationId: $locationId) {
+          quantities(names: ["available"]) {
+            name
+            quantity
+          }
+        }
+      }
+    }`,
+    { inventoryItemId: destInventoryItemId, locationId: destLocationId }
+  );
+  if (verifyResult.errors?.length) return verifyResult.errors[0].message;
+
+  const verifiedQuantity =
+    verifyResult.data?.inventoryItem?.inventoryLevel?.quantities?.find(
+      (q: { name: string; quantity: number }) => q.name === "available"
+    )?.quantity;
+
+  if (verifiedQuantity !== quantity) {
+    return `Inventory write did not stick: destination has ${verifiedQuantity ?? "unknown"}, expected ${quantity}`;
+  }
+
+  return null;
 }
 
 /**

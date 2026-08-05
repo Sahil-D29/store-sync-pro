@@ -137,10 +137,15 @@ export const INVENTORY_ACTIVATE_MUTATION = `#graphql
 `;
 
 export const INVENTORY_SET_QUANTITIES_MUTATION = `#graphql
-  mutation InventorySetQuantities($input: InventorySetQuantitiesInput!) {
-    inventorySetQuantities(input: $input) {
+  mutation InventorySetQuantities($input: InventorySetQuantitiesInput!, $idempotencyKey: String!) {
+    inventorySetQuantities(input: $input) @idempotent(key: $idempotencyKey) {
       inventoryAdjustmentGroup {
         reason
+        changes {
+          name
+          delta
+          quantityAfterChange
+        }
       }
       userErrors {
         field
