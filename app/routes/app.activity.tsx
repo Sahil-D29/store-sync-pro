@@ -16,11 +16,12 @@ import {
 import { TitleBar } from "@shopify/app-bridge-react";
 import { authenticate } from "../shopify.server";
 import prisma from "../db.server";
+import { getAccountShop } from "../services/store-management.server";
 
 const PAGE_SIZE = 25;
 
 export const loader = async ({ request }: LoaderFunctionArgs) => {
-  await authenticate.admin(request);
+  const { session } = await authenticate.admin(request);
 
   const url = new URL(request.url);
   const page = parseInt(url.searchParams.get("page") || "1");
@@ -29,11 +30,49 @@ export const loader = async ({ request }: LoaderFunctionArgs) => {
   const trigger = url.searchParams.get("trigger") || "";
   const syncRuleId = url.searchParams.get("syncRuleId") || "";
 
-  const where: any = {};
-  if (resourceType) where.resourceType = resourceType;
-  if (status) where.status = status;
-  if (trigger) where.trigger = trigger;
-  if (syncRuleId) where.syncRuleId = syncRuleId;
+  const ownerShop = await getAccountShop(session.shop);
+  const currentStore = await prisma.connectedStore.findFirst({
+    where: { shopDomain: session.shop, ownerShop },
+    select: { id: true, isBaseStore: true },
+  });
+
+  const accountScope = currentStore?.isBaseStore
+    ? {
+        OR: [
+          { syncRule: { ownerShop } },
+          { store: { ownerShop } },
+        ],
+      }
+    : {
+        OR: [
+          { storeId: currentStore?.id || "__missing_store__" },
+          {
+            syncRule: {
+              ownerShop,
+              OR: [
+                { sourceStoreId: currentStore?.id || "__missing_store__" },
+                { destStoreId: currentStore?.id || "__missing_store__" },
+              ],
+            },
+          },
+        ],
+      };
+
+  const where: any = { AND: [accountScope] };
+  if (resourceType) where.AND.push({ resourceType });
+  if (status) where.AND.push({ status });
+  if (trigger) where.AND.push({ trigger });
+  if (syncRuleId) where.AND.push({ syncRuleId });
+
+  const syncRuleWhere = currentStore?.isBaseStore
+    ? { ownerShop }
+    : {
+        ownerShop,
+        OR: [
+          { sourceStoreId: currentStore?.id || "__missing_store__" },
+          { destStoreId: currentStore?.id || "__missing_store__" },
+        ],
+      };
 
   const [logs, total, syncRules] = await Promise.all([
     prisma.syncLog.findMany({
@@ -48,6 +87,7 @@ export const loader = async ({ request }: LoaderFunctionArgs) => {
     }),
     prisma.syncLog.count({ where }),
     prisma.syncRule.findMany({
+      where: syncRuleWhere,
       select: { id: true, name: true },
       orderBy: { name: "asc" },
     }),

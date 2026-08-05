@@ -365,7 +365,6 @@ async function setDestinationInventoryQuantity(
       input: {
         reason: "correction",
         name: "available",
-        ignoreCompareQuantity: true,
         referenceDocumentUri: `dorec-store-sync://inventory-sync/${randomUUID()}`,
         quantities: [
           {
