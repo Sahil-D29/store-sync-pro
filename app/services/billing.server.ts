@@ -42,6 +42,21 @@ const GET_SHOPIFY_BILLING_CONTEXT_QUERY = `#graphql
   }
 `;
 
+const GET_ADMIN_ACTIVE_SUBSCRIPTIONS_QUERY = `#graphql
+  query AdminActiveSubscriptions {
+    currentAppInstallation {
+      activeSubscriptions {
+        id
+        name
+        status
+        createdAt
+        currentPeriodEnd
+        trialDays
+      }
+    }
+  }
+`;
+
 const GET_ACTIVE_APP_PRICING_SUBSCRIPTION_QUERY = `#graphql
   query ActiveSubscription($appId: ID!, $shopId: ID!) {
     activeSubscription(appId: $appId, shopId: $shopId) {
@@ -99,6 +114,15 @@ type PartnerActiveSubscription = {
   legacySubscriptionId?: string | null;
 };
 
+type AdminActiveSubscription = {
+  id: string;
+  name?: string | null;
+  status?: string | null;
+  createdAt?: string | null;
+  currentPeriodEnd?: string | null;
+  trialDays?: number | null;
+};
+
 type SyncResult = {
   subscription: Awaited<ReturnType<typeof getSubscription>>;
   warning: string | null;
@@ -112,6 +136,13 @@ function parseDate(value: string | null | undefined): Date | null {
   if (!value) return null;
   const date = new Date(value);
   return Number.isNaN(date.getTime()) ? null : date;
+}
+
+function hasPartnerApiCredentials(): boolean {
+  return Boolean(
+    process.env.SHOPIFY_PARTNER_ORG_ID &&
+      process.env.SHOPIFY_PARTNER_ACCESS_TOKEN
+  );
 }
 
 function appPricingConfigWarning(): string | null {
@@ -212,6 +243,29 @@ function statusFromPartnerSubscription(
   return "ACTIVE";
 }
 
+function statusFromAdminSubscription(
+  subscription: AdminActiveSubscription
+): SubscriptionStatus {
+  if (subscription.status === "FROZEN") return "FROZEN";
+  if (["CANCELLED", "DECLINED", "EXPIRED"].includes(subscription.status || "")) {
+    return "CANCELLED";
+  }
+
+  const createdAt = parseDate(subscription.createdAt);
+  const trialEndsAt =
+    createdAt && subscription.trialDays && subscription.trialDays > 0
+      ? new Date(
+          createdAt.getTime() + subscription.trialDays * 24 * 60 * 60 * 1000
+        )
+      : null;
+
+  if (trialEndsAt && trialEndsAt.getTime() > Date.now()) {
+    return "TRIAL";
+  }
+
+  return "ACTIVE";
+}
+
 async function getShopifyBillingContext(
   admin: ShopifyAdminClient
 ): Promise<ShopifyBillingContext> {
@@ -283,6 +337,27 @@ async function queryPartnerActiveSubscription(
   return result?.data?.activeSubscription || null;
 }
 
+async function queryAdminActiveSubscriptions(
+  admin: ShopifyAdminClient
+): Promise<AdminActiveSubscription[]> {
+  const response = await admin.graphql(GET_ADMIN_ACTIVE_SUBSCRIPTIONS_QUERY);
+  if (!response.ok) {
+    throw new Error(`Shopify Admin subscription query failed with ${response.status}`);
+  }
+
+  const result = await response.json();
+  if (result?.errors?.length) {
+    throw new Error(
+      result.errors.map((error: { message?: string }) => error.message).join("; ")
+    );
+  }
+
+  const subscriptions =
+    result?.data?.currentAppInstallation?.activeSubscriptions;
+
+  return Array.isArray(subscriptions) ? subscriptions : [];
+}
+
 function activeSubscriptionPlan(
   subscription: PartnerActiveSubscription,
   planHandleHint?: string | null
@@ -294,6 +369,15 @@ function activeSubscriptionPlan(
   const planHandle = activeItem?.handle || planHandleHint || null;
   const plan = planFromShopifyPricing(planHandle, activeItem?.description);
 
+  return { plan, planHandle };
+}
+
+function adminSubscriptionPlan(
+  subscription: AdminActiveSubscription,
+  planHandleHint?: string | null
+): { plan: BillingPlan | null; planHandle: string | null } {
+  const planHandle = planHandleHint || subscription.name || null;
+  const plan = planFromShopifyPricing(planHandle, subscription.name);
   return { plan, planHandle };
 }
 
@@ -328,6 +412,71 @@ async function upsertFreeSubscription(
   });
 }
 
+async function syncSubscriptionFromAdminFallback(
+  admin: ShopifyAdminClient,
+  shopDomain: string,
+  context: ShopifyBillingContext,
+  planHandleHint?: string | null
+): Promise<SyncResult> {
+  if (planFromShopifyPricing(planHandleHint) === "FREE") {
+    const subscription = await upsertFreeSubscription(shopDomain, context);
+    return { subscription, warning: null };
+  }
+
+  const activeSubscriptions = await queryAdminActiveSubscriptions(admin);
+
+  if (activeSubscriptions.length === 0) {
+    const subscription = await upsertFreeSubscription(shopDomain, context);
+    return { subscription, warning: null };
+  }
+
+  const activeSubscription = activeSubscriptions[0];
+  const { plan, planHandle } = adminSubscriptionPlan(
+    activeSubscription,
+    planHandleHint
+  );
+
+  if (!plan) {
+    const subscription = await getSubscription(shopDomain);
+    return {
+      subscription,
+      warning:
+        "Couldn't map the current Shopify pricing plan. Reload after Shopify finishes updating the subscription.",
+    };
+  }
+
+  const subscription = await prisma.subscription.upsert({
+    where: { shopDomain },
+    update: {
+      plan,
+      productLimit: productLimitForPlan(plan),
+      shopifyChargeGid: activeSubscription.id,
+      shopifyShopGid: context.shopId,
+      shopifyAppGid: context.appId,
+      planHandle,
+      status: statusFromAdminSubscription(activeSubscription),
+      trialEndsAt: null,
+      currentPeriodEnd: parseDate(activeSubscription.currentPeriodEnd),
+      lastSyncedAt: new Date(),
+    },
+    create: {
+      shopDomain,
+      plan,
+      productLimit: productLimitForPlan(plan),
+      shopifyChargeGid: activeSubscription.id,
+      shopifyShopGid: context.shopId,
+      shopifyAppGid: context.appId,
+      planHandle,
+      status: statusFromAdminSubscription(activeSubscription),
+      trialEndsAt: null,
+      currentPeriodEnd: parseDate(activeSubscription.currentPeriodEnd),
+      lastSyncedAt: new Date(),
+    },
+  });
+
+  return { subscription, warning: null };
+}
+
 /**
  * Reconcile local subscription state with Shopify App Pricing.
  *
@@ -344,6 +493,19 @@ export async function syncSubscriptionFromShopifyWithStatus(
 
   try {
     const context = await getShopifyBillingContext(admin);
+
+    if (!hasPartnerApiCredentials()) {
+      console.warn(
+        "[Billing] Partner API credentials missing; using Shopify Admin subscription fallback."
+      );
+      return syncSubscriptionFromAdminFallback(
+        admin,
+        shopDomain,
+        context,
+        planHandleHint
+      );
+    }
+
     const activeSubscription = await queryPartnerActiveSubscription(context);
 
     if (!activeSubscription) {
