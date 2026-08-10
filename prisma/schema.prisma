@@ -396,10 +396,14 @@ model Subscription {
   shopDomain       String           @unique
   plan             BillingPlan      @default(FREE)
   shopifyChargeGid String?
+  shopifyShopGid   String?
+  shopifyAppGid    String?
+  planHandle       String?
   productLimit     Int              @default(100)
   status           SubscriptionStatus @default(ACTIVE)
   trialEndsAt      DateTime?
   currentPeriodEnd DateTime?
+  lastSyncedAt     DateTime?
   createdAt        DateTime         @default(now())
   updatedAt        DateTime         @updatedAt
 }

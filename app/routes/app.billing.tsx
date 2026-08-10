@@ -1,6 +1,6 @@
-import type { ActionFunctionArgs, LoaderFunctionArgs } from "@remix-run/node";
-import { json, redirect } from "@remix-run/node";
-import { useLoaderData, useActionData, useRouteError } from "@remix-run/react";
+import type { LoaderFunctionArgs } from "@remix-run/node";
+import { json } from "@remix-run/node";
+import { useLoaderData, useRouteError } from "@remix-run/react";
 import {
   Page,
   Card,
@@ -17,9 +17,9 @@ import {
 import { TitleBar } from "@shopify/app-bridge-react";
 import { authenticate } from "../shopify.server";
 import {
-  createBillingSubscription,
-  syncSubscriptionFromShopify,
   BILLING_PLANS,
+  getShopifyManagedPricingUrl,
+  syncSubscriptionFromShopifyWithStatus,
 } from "../services/billing.server";
 import prisma from "../db.server";
 import { withDbRetry } from "../utils/db-retry.server";
@@ -27,6 +27,8 @@ import { withDbRetry } from "../utils/db-retry.server";
 export const loader = async ({ request }: LoaderFunctionArgs) => {
   const { admin, session } = await authenticate.admin(request);
   const shopDomain = session.shop;
+  const url = new URL(request.url);
+  const planHandleHint = url.searchParams.get("plan_handle");
 
   const plans = Object.entries(BILLING_PLANS).map(([key, plan]) => ({
     key,
@@ -36,15 +38,14 @@ export const loader = async ({ request }: LoaderFunctionArgs) => {
     trialDays: plan.trialDays,
   }));
 
-  // This app uses Shopify "Managed Pricing", so plan changes happen on Shopify's
-  // hosted pricing page (the Billing API mutations are blocked for managed apps).
-  // Point merchants at that page instead of calling appSubscriptionCreate.
-  const shopHandle = shopDomain.replace(/\.myshopify\.com$/, "");
-  const appHandle = process.env.SHOPIFY_APP_HANDLE || "store-sync-auto";
-  const managedPricingUrl = `https://admin.shopify.com/store/${shopHandle}/charges/${appHandle}/pricing_plans`;
+  const managedPricingUrl = getShopifyManagedPricingUrl(shopDomain);
 
   try {
-    const subscription = await syncSubscriptionFromShopify(admin, shopDomain);
+    const { subscription, warning } = await syncSubscriptionFromShopifyWithStatus(
+      admin,
+      shopDomain,
+      planHandleHint
+    );
     const usage = await withDbRetry(() =>
       prisma.usageTracker.findUnique({ where: { shopDomain } })
     );
@@ -63,7 +64,7 @@ export const loader = async ({ request }: LoaderFunctionArgs) => {
       usage: { syncedProductCount: usage?.syncedProductCount ?? 0 },
       plans,
       managedPricingUrl,
-      loadError: null as string | null,
+      loadError: warning,
     });
   } catch (e) {
     console.error("[Billing] Loader DB error:", (e as Error).message);
@@ -85,51 +86,8 @@ export const loader = async ({ request }: LoaderFunctionArgs) => {
   }
 };
 
-export const action = async ({ request }: ActionFunctionArgs) => {
-  const { admin, session } = await authenticate.admin(request);
-  const formData = await request.formData();
-  const plan = formData.get("plan") as string;
-
-  if (!plan) {
-    return json({ error: "Plan is required" }, { status: 400 });
-  }
-
-  const url = new URL(request.url);
-  const returnUrl = `${url.origin}/app/billing`;
-
-  try {
-    const result = await createBillingSubscription(
-      admin,
-      session.shop,
-      plan as any,
-      returnUrl,
-      process.env.NODE_ENV !== "production" // Use test mode in dev
-    );
-
-    if (result.error) {
-      return json({ error: result.error }, { status: 400 });
-    }
-
-    if (result.confirmationUrl) {
-      return redirect(result.confirmationUrl);
-    }
-
-    return json({ success: true, message: "Plan updated" });
-  } catch (e) {
-    console.error("[Billing] Subscription action error:", (e as Error).message);
-    return json(
-      {
-        error:
-          "Couldn't start the plan change. Please try again in a moment. If this persists, reopen the app from your Shopify admin.",
-      },
-      { status: 500 }
-    );
-  }
-};
-
 export default function BillingPage() {
   const { subscription, usage, plans, loadError, managedPricingUrl } = useLoaderData<typeof loader>();
-  const actionData = useActionData<{ error?: string; success?: boolean; message?: string }>();
 
   const currentPlan = subscription.plan;
   const usagePercent =
@@ -156,15 +114,11 @@ export default function BillingPage() {
             <p>{loadError}</p>
           </Banner>
         )}
-        {actionData?.error && (
-          <Banner tone="critical" title="Couldn't update plan">
-            <p>{actionData.error}</p>
-          </Banner>
-        )}
         <Banner tone="info">
           <p>
             Plans are managed by Shopify. Choosing a plan opens Shopify's secure
-            checkout, and your selection is applied automatically when you return.
+            pricing page, and your selection is confirmed automatically when you
+            return.
           </p>
         </Banner>
         {/* Current Plan */}
