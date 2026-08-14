@@ -1,22 +1,13 @@
-import type { SyncRule, ConnectedStore, PriceRule } from "@prisma/client";
-import { ShopifyGraphQLClient } from "./shopify-client.server";
+import type { ShopifyGraphQLClient } from "./shopify-client.server";
 import {
   METAFIELDS_SET_MUTATION,
   METAFIELD_DEFINITION_CREATE_MUTATION,
 } from "../graphql/mutations";
-
-type SyncRuleWithRelations = SyncRule & {
-  sourceStore: ConnectedStore;
-  destStore: ConnectedStore;
-  priceRule: PriceRule | null;
-};
-
-interface MetafieldData {
-  namespace: string;
-  key: string;
-  value: string;
-  type: string;
-}
+import {
+  logSkippedMetafields,
+  sanitizeMetafieldsForDestination,
+} from "./metafield-sanitizer.server";
+import type { MetafieldData } from "./metafield-sanitizer.server";
 
 interface SyncMetafieldResult {
   success: boolean;
@@ -46,13 +37,21 @@ export async function syncMetafields(
 
   if (!metafields.length) return result;
 
+  const sanitized = sanitizeMetafieldsForDestination(metafields);
+  logSkippedMetafields(
+    sanitized.skipped,
+    `metafieldsSet for ${ownerType.toLowerCase()} ${ownerGid}`
+  );
+
+  if (!sanitized.metafields.length) return result;
+
   // Ensure metafield definitions exist on destination
-  for (const mf of metafields) {
+  for (const mf of sanitized.metafields) {
     await ensureMetafieldDefinition(mf, destClient, ownerType);
   }
 
   // Set metafields on the destination resource
-  const metafieldsInput = metafields.map((mf) => ({
+  const metafieldsInput = sanitized.metafields.map((mf) => ({
     ownerId: ownerGid,
     namespace: mf.namespace,
     key: mf.key,

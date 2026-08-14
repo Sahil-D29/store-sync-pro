@@ -371,6 +371,7 @@ async function setDestinationInventoryQuantity(
             inventoryItemId: destInventoryItemId,
             locationId: destLocationId,
             quantity,
+            changeFromQuantity: null,
           },
         ],
       },

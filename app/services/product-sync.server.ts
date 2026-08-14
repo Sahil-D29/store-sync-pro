@@ -6,6 +6,10 @@ import { GET_PRODUCT_FOR_SYNC } from "../graphql/queries";
 import { PRODUCT_SET_MUTATION, PRODUCT_DELETE_MUTATION } from "../graphql/mutations";
 import { transformPrice, getExchangeRate } from "./price-transformer.server";
 import { checkProductLimit, incrementProductCount } from "./billing.server";
+import {
+  logSkippedMetafields,
+  sanitizeMetafieldsForDestination,
+} from "./metafield-sanitizer.server";
 
 interface SyncProductResult {
   success: boolean;
@@ -421,15 +425,6 @@ export async function deleteProductOnDestination(
   }
 }
 
-/**
- * Build ProductSetInput from source product data
- */
-function canCopyProductMetafieldToDestination(metafield: any): boolean {
-  const type = String(metafield.type || "");
-  const value = String(metafield.value || "");
-  return !type.includes("metaobject_reference") && !value.includes("gid://shopify/Metaobject/");
-}
-
 async function buildProductSetInput(
   sourceProduct: any,
   syncRule: SyncRuleWithRelations,
@@ -583,15 +578,21 @@ async function buildProductSetInput(
     syncRule.syncMetafields &&
     sourceProduct.metafields?.edges?.length
   ) {
-    const metafields = sourceProduct.metafields.edges
+    const { metafields, skipped } = sanitizeMetafieldsForDestination(
+      sourceProduct.metafields.edges
       .map((edge: any) => edge.node)
-      .filter(canCopyProductMetafieldToDestination)
       .map((metafield: any) => ({
         namespace: metafield.namespace,
         key: metafield.key,
         value: metafield.value,
         type: metafield.type,
-      }));
+      }))
+    );
+
+    logSkippedMetafields(
+      skipped,
+      `productSet for ${sourceProduct.handle || sourceProduct.id}`
+    );
 
     if (metafields.length) {
       input.metafields = metafields;
