@@ -651,11 +651,13 @@ export async function syncInventoryItem(
     }
 
     if (!mapping?.destProductGid || !variantMap?.destVariantGid) {
+      console.warn(
+        `[InventorySync] Skipping inventory item ${inventoryItemId}; no destination variant mapping found for source variant ${sourceVariant.id}`
+      );
       return {
-        success: false,
+        success: true,
         action: "SKIP",
         sourceGid: inventoryItemId,
-        error: "No destination variant mapping found",
         duration: Date.now() - startTime,
       };
     }
