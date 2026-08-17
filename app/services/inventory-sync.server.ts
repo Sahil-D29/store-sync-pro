@@ -271,6 +271,15 @@ function availableQuantityFromLevels(
   }, 0);
 }
 
+function availableQuantityFromInventoryLevel(
+  inventoryLevel: { quantities?: Array<{ name: string; quantity: number }> } | null | undefined
+) {
+  return (
+    inventoryLevel?.quantities?.find((quantity) => quantity.name === "available")
+      ?.quantity ?? 0
+  );
+}
+
 async function getPrimaryLocationId(
   client: ShopifyGraphQLClient
 ): Promise<string | null> {
@@ -323,6 +332,10 @@ async function setDestinationInventoryQuantity(
           tracked
           inventoryLevel(locationId: $locationId) {
             id
+            quantities(names: ["available"]) {
+              name
+              quantity
+            }
           }
         }
       }
@@ -359,6 +372,14 @@ async function setDestinationInventoryQuantity(
     return errors?.length ? errors[0].message : null;
   }
 
+  const changeFromQuantity = availableQuantityFromInventoryLevel(
+    destInventoryItem.inventoryLevel
+  );
+
+  console.log(
+    `[InventorySync] Setting destination inventory item ${destInventoryItemId} at ${destLocationId}: ${changeFromQuantity} -> ${quantity}`
+  );
+
   const setResult = await destClient.queryWithRetry(
     INVENTORY_SET_QUANTITIES_MUTATION,
     {
@@ -371,7 +392,7 @@ async function setDestinationInventoryQuantity(
             inventoryItemId: destInventoryItemId,
             locationId: destLocationId,
             quantity,
-            changeFromQuantity: null,
+            changeFromQuantity,
           },
         ],
       },
