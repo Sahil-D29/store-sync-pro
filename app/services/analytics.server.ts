@@ -1,13 +1,108 @@
 import prisma from "../db.server";
 
+type AnalyticsScope = {
+  ownerShop: string;
+  currentStoreId?: string;
+  currentStoreIsBase?: boolean;
+};
+
+const MISSING_STORE_ID = "__missing_store__";
+
+function ruleWhere(scope: AnalyticsScope) {
+  if (scope.currentStoreIsBase !== false) {
+    return { ownerShop: scope.ownerShop };
+  }
+
+  const currentStoreId = scope.currentStoreId || MISSING_STORE_ID;
+  return {
+    ownerShop: scope.ownerShop,
+    OR: [{ sourceStoreId: currentStoreId }, { destStoreId: currentStoreId }],
+  };
+}
+
+function logWhere(scope: AnalyticsScope) {
+  if (scope.currentStoreIsBase !== false) {
+    return {
+      OR: [
+        { syncRule: { ownerShop: scope.ownerShop } },
+        { AND: [{ syncRuleId: null }, { store: { ownerShop: scope.ownerShop } }] },
+      ],
+    };
+  }
+
+  const currentStoreId = scope.currentStoreId || MISSING_STORE_ID;
+  return {
+    OR: [
+      {
+        syncRule: {
+          ownerShop: scope.ownerShop,
+          OR: [
+            { sourceStoreId: currentStoreId },
+            { destStoreId: currentStoreId },
+          ],
+        },
+      },
+      { AND: [{ syncRuleId: null }, { storeId: currentStoreId }] },
+    ],
+  };
+}
+
+function storeWhere(scope: AnalyticsScope) {
+  if (scope.currentStoreIsBase !== false) {
+    return { ownerShop: scope.ownerShop, status: "ACTIVE" as const };
+  }
+
+  return {
+    ownerShop: scope.ownerShop,
+    status: "ACTIVE" as const,
+    OR: [
+      { shopDomain: scope.ownerShop },
+      { id: scope.currentStoreId || MISSING_STORE_ID },
+    ],
+  };
+}
+
+function productMappingWhere(scope: AnalyticsScope) {
+  if (scope.currentStoreIsBase !== false) {
+    return {
+      status: "SYNCED" as const,
+      sourceStore: { ownerShop: scope.ownerShop },
+    };
+  }
+
+  const currentStoreId = scope.currentStoreId || MISSING_STORE_ID;
+  return {
+    status: "SYNCED" as const,
+    destStoreId: currentStoreId,
+    sourceStore: { ownerShop: scope.ownerShop },
+  };
+}
+
+function collectionMappingWhere(scope: AnalyticsScope) {
+  if (scope.currentStoreIsBase !== false) {
+    return {
+      status: "SYNCED" as const,
+      sourceStore: { ownerShop: scope.ownerShop },
+    };
+  }
+
+  const currentStoreId = scope.currentStoreId || MISSING_STORE_ID;
+  return {
+    status: "SYNCED" as const,
+    destStoreId: currentStoreId,
+    sourceStore: { ownerShop: scope.ownerShop },
+  };
+}
+
 /**
  * Get dashboard analytics data.
  */
-export async function getDashboardAnalytics(shopDomain?: string) {
+export async function getDashboardAnalytics(scope: AnalyticsScope) {
   const now = new Date();
   const oneDayAgo = new Date(now.getTime() - 24 * 60 * 60 * 1000);
   const sevenDaysAgo = new Date(now.getTime() - 7 * 24 * 60 * 60 * 1000);
   const thirtyDaysAgo = new Date(now.getTime() - 30 * 24 * 60 * 60 * 1000);
+  const logsScope = logWhere(scope);
 
   const [
     totalStores,
@@ -24,17 +119,32 @@ export async function getDashboardAnalytics(shopDomain?: string) {
     syncsByResource,
     syncsByTrigger,
   ] = await Promise.all([
-    prisma.connectedStore.count({ where: { status: "ACTIVE" } }),
-    prisma.syncRule.count({ where: { isActive: true } }),
-    prisma.syncLog.count({ where: { status: "SUCCESS", createdAt: { gte: oneDayAgo } } }),
-    prisma.syncLog.count({ where: { status: "FAILED", createdAt: { gte: oneDayAgo } } }),
-    prisma.syncLog.count({ where: { status: "SUCCESS", createdAt: { gte: sevenDaysAgo } } }),
-    prisma.syncLog.count({ where: { status: "FAILED", createdAt: { gte: sevenDaysAgo } } }),
-    prisma.syncLog.count({ where: { status: "SUCCESS", createdAt: { gte: thirtyDaysAgo } } }),
-    prisma.syncLog.count({ where: { status: "FAILED", createdAt: { gte: thirtyDaysAgo } } }),
-    prisma.productMapping.count({ where: { status: "SYNCED" } }),
-    prisma.collectionMapping.count({ where: { status: "SYNCED" } }),
+    prisma.connectedStore.count({
+      where: storeWhere(scope),
+    }),
+    prisma.syncRule.count({ where: { ...ruleWhere(scope), isActive: true } }),
+    prisma.syncLog.count({
+      where: { AND: [logsScope, { status: "SUCCESS", createdAt: { gte: oneDayAgo } }] },
+    }),
+    prisma.syncLog.count({
+      where: { AND: [logsScope, { status: "FAILED", createdAt: { gte: oneDayAgo } }] },
+    }),
+    prisma.syncLog.count({
+      where: { AND: [logsScope, { status: "SUCCESS", createdAt: { gte: sevenDaysAgo } }] },
+    }),
+    prisma.syncLog.count({
+      where: { AND: [logsScope, { status: "FAILED", createdAt: { gte: sevenDaysAgo } }] },
+    }),
+    prisma.syncLog.count({
+      where: { AND: [logsScope, { status: "SUCCESS", createdAt: { gte: thirtyDaysAgo } }] },
+    }),
+    prisma.syncLog.count({
+      where: { AND: [logsScope, { status: "FAILED", createdAt: { gte: thirtyDaysAgo } }] },
+    }),
+    prisma.productMapping.count({ where: productMappingWhere(scope) }),
+    prisma.collectionMapping.count({ where: collectionMappingWhere(scope) }),
     prisma.syncLog.findMany({
+      where: logsScope,
       orderBy: { createdAt: "desc" },
       take: 20,
       include: {
@@ -44,12 +154,12 @@ export async function getDashboardAnalytics(shopDomain?: string) {
     }),
     prisma.syncLog.groupBy({
       by: ["resourceType"],
-      where: { createdAt: { gte: sevenDaysAgo } },
+      where: { AND: [logsScope, { createdAt: { gte: sevenDaysAgo } }] },
       _count: true,
     }),
     prisma.syncLog.groupBy({
       by: ["trigger"],
-      where: { createdAt: { gte: sevenDaysAgo } },
+      where: { AND: [logsScope, { createdAt: { gte: sevenDaysAgo } }] },
       _count: true,
     }),
   ]);
@@ -141,12 +251,13 @@ export async function getRuleSyncMetrics(syncRuleId: string) {
 /**
  * Get daily sync counts for charting (last N days).
  */
-export async function getDailySyncCounts(days: number = 7): Promise<Array<{
+export async function getDailySyncCounts(scope: AnalyticsScope, days: number = 7): Promise<Array<{
   date: string;
   success: number;
   failed: number;
 }>> {
   const results: Array<{ date: string; success: number; failed: number }> = [];
+  const logsScope = logWhere(scope);
 
   for (let i = days - 1; i >= 0; i--) {
     const dayStart = new Date();
@@ -158,10 +269,20 @@ export async function getDailySyncCounts(days: number = 7): Promise<Array<{
 
     const [success, failed] = await Promise.all([
       prisma.syncLog.count({
-        where: { status: "SUCCESS", createdAt: { gte: dayStart, lt: dayEnd } },
+        where: {
+          AND: [
+            logsScope,
+            { status: "SUCCESS", createdAt: { gte: dayStart, lt: dayEnd } },
+          ],
+        },
       }),
       prisma.syncLog.count({
-        where: { status: "FAILED", createdAt: { gte: dayStart, lt: dayEnd } },
+        where: {
+          AND: [
+            logsScope,
+            { status: "FAILED", createdAt: { gte: dayStart, lt: dayEnd } },
+          ],
+        },
       }),
     ]);
 
@@ -178,9 +299,10 @@ export async function getDailySyncCounts(days: number = 7): Promise<Array<{
 /**
  * Get store-level sync summary.
  */
-export async function getStoreSyncSummary() {
+export async function getStoreSyncSummary(scope: AnalyticsScope) {
   const stores = await prisma.connectedStore.findMany({
-    where: { status: "ACTIVE" },
+    where: storeWhere(scope),
+    orderBy: [{ isBaseStore: "desc" }, { createdAt: "asc" }],
     select: {
       id: true,
       shopDomain: true,
@@ -189,12 +311,36 @@ export async function getStoreSyncSummary() {
       lastSyncAt: true,
       _count: {
         select: {
-          productMappingsAsSource: true,
-          productMappingsAsDest: true,
-          collectionMappingsAsSource: true,
-          collectionMappingsAsDest: true,
-          syncRulesAsSource: true,
-          syncRulesAsDest: true,
+          productMappingsAsSource: {
+            where: {
+              status: "SYNCED",
+              sourceStore: { ownerShop: scope.ownerShop },
+            },
+          },
+          productMappingsAsDest: {
+            where: {
+              status: "SYNCED",
+              sourceStore: { ownerShop: scope.ownerShop },
+            },
+          },
+          collectionMappingsAsSource: {
+            where: {
+              status: "SYNCED",
+              sourceStore: { ownerShop: scope.ownerShop },
+            },
+          },
+          collectionMappingsAsDest: {
+            where: {
+              status: "SYNCED",
+              sourceStore: { ownerShop: scope.ownerShop },
+            },
+          },
+          syncRulesAsSource: {
+            where: { ownerShop: scope.ownerShop, isActive: true },
+          },
+          syncRulesAsDest: {
+            where: { ownerShop: scope.ownerShop, isActive: true },
+          },
         },
       },
     },

@@ -11,23 +11,36 @@ import {
   Box,
   ProgressBar,
   IndexTable,
-  Divider,
 } from "@shopify/polaris";
 import { TitleBar } from "@shopify/app-bridge-react";
 import { authenticate } from "../shopify.server";
+import prisma from "../db.server";
 import {
   getDashboardAnalytics,
   getDailySyncCounts,
   getStoreSyncSummary,
 } from "../services/analytics.server";
+import { getAccountShop } from "../services/store-management.server";
 
 export const loader = async ({ request }: LoaderFunctionArgs) => {
-  await authenticate.admin(request);
+  const { session } = await authenticate.admin(request);
+
+  const ownerShop = await getAccountShop(session.shop);
+  const currentStore = await prisma.connectedStore.findFirst({
+    where: { shopDomain: session.shop, ownerShop },
+    select: { id: true, isBaseStore: true },
+  });
+
+  const scope = {
+    ownerShop,
+    currentStoreId: currentStore?.id,
+    currentStoreIsBase: currentStore?.isBaseStore ?? true,
+  };
 
   const [analytics, dailyCounts, storeSummary] = await Promise.all([
-    getDashboardAnalytics(),
-    getDailySyncCounts(7),
-    getStoreSyncSummary(),
+    getDashboardAnalytics(scope),
+    getDailySyncCounts(scope, 7),
+    getStoreSyncSummary(scope),
   ]);
 
   return json({ analytics, dailyCounts, storeSummary });
