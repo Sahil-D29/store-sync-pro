@@ -156,6 +156,26 @@ export const INVENTORY_SET_QUANTITIES_MUTATION = `#graphql
   }
 `;
 
+export const INVENTORY_ADJUST_QUANTITIES_MUTATION = `#graphql
+  mutation InventoryAdjustQuantities($input: InventoryAdjustQuantitiesInput!) {
+    inventoryAdjustQuantities(input: $input) {
+      inventoryAdjustmentGroup {
+        reason
+        changes {
+          name
+          delta
+          quantityAfterChange
+        }
+      }
+      userErrors {
+        field
+        message
+        code
+      }
+    }
+  }
+`;
+
 export const INVENTORY_ITEM_UPDATE_MUTATION = `#graphql
   mutation InventoryItemUpdate($id: ID!, $input: InventoryItemInput!) {
     inventoryItemUpdate(id: $id, input: $input) {

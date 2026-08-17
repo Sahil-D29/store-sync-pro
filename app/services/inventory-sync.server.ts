@@ -3,8 +3,8 @@ import prisma from "../db.server";
 import type { ShopifyGraphQLClient } from "./shopify-client.server";
 import {
   INVENTORY_ACTIVATE_MUTATION,
+  INVENTORY_ADJUST_QUANTITIES_MUTATION,
   INVENTORY_ITEM_UPDATE_MUTATION,
-  INVENTORY_SET_QUANTITIES_MUTATION,
 } from "../graphql/mutations";
 
 interface InventorySyncScope {
@@ -380,30 +380,35 @@ async function setDestinationInventoryQuantity(
     `[InventorySync] Setting destination inventory item ${destInventoryItemId} at ${destLocationId}: ${changeFromQuantity} -> ${quantity}`
   );
 
-  const setResult = await destClient.queryWithRetry(
-    INVENTORY_SET_QUANTITIES_MUTATION,
-    {
-      input: {
-        reason: "correction",
-        name: "available",
-        referenceDocumentUri: `dorec-store-sync://inventory-sync/${randomUUID()}`,
-        quantities: [
-          {
-            inventoryItemId: destInventoryItemId,
-            locationId: destLocationId,
-            quantity,
-            changeFromQuantity,
-          },
-        ],
-      },
-      idempotencyKey: randomUUID(),
-    }
-  );
+  const delta = quantity - changeFromQuantity;
+  if (delta === 0) {
+    console.log(
+      `[InventorySync] Destination inventory item ${destInventoryItemId} already has quantity ${quantity}; skipping adjustment`
+    );
+  } else {
+    const adjustResult = await destClient.queryWithRetry(
+      INVENTORY_ADJUST_QUANTITIES_MUTATION,
+      {
+        input: {
+          reason: "correction",
+          name: "available",
+          referenceDocumentUri: `dorec-store-sync://inventory-sync/${randomUUID()}`,
+          changes: [
+            {
+              inventoryItemId: destInventoryItemId,
+              locationId: destLocationId,
+              delta,
+            },
+          ],
+        },
+      }
+    );
 
-  if (setResult.errors?.length) return setResult.errors[0].message;
+    if (adjustResult.errors?.length) return adjustResult.errors[0].message;
 
-  const errors = setResult.data?.inventorySetQuantities?.userErrors;
-  if (errors?.length) return errors[0].message;
+    const errors = adjustResult.data?.inventoryAdjustQuantities?.userErrors;
+    if (errors?.length) return errors[0].message;
+  }
 
   const verifyResult = await destClient.queryWithRetry(
     `#graphql
