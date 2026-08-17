@@ -157,8 +157,8 @@ export const INVENTORY_SET_QUANTITIES_MUTATION = `#graphql
 `;
 
 export const INVENTORY_ADJUST_QUANTITIES_MUTATION = `#graphql
-  mutation InventoryAdjustQuantities($input: InventoryAdjustQuantitiesInput!) {
-    inventoryAdjustQuantities(input: $input) {
+  mutation InventoryAdjustQuantities($input: InventoryAdjustQuantitiesInput!, $idempotencyKey: String!) {
+    inventoryAdjustQuantities(input: $input) @idempotent(key: $idempotencyKey) {
       inventoryAdjustmentGroup {
         reason
         changes {
