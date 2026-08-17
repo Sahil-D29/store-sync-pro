@@ -20,6 +20,13 @@ interface SyncInventoryResult {
   duration: number;
 }
 
+type InventoryWriteMethod = "GRAPHQL" | "REST_FALLBACK" | "ACTIVATE" | "NOOP";
+
+interface InventoryWriteResult {
+  error: string | null;
+  method?: InventoryWriteMethod;
+}
+
 type ProductMappingRecord = Awaited<
   ReturnType<typeof prisma.productMapping.findUnique>
 >;
@@ -29,6 +36,8 @@ type ProductVariantForMapping = {
   sku: string | null;
   title: string | null;
 };
+
+const inventoryRestFallbackShops = new Set<string>();
 
 function parseVariantMappings(value: string | null | undefined): Array<{
   sourceVariantGid: string;
@@ -280,6 +289,33 @@ function availableQuantityFromInventoryLevel(
   );
 }
 
+function shouldUseRestInventoryFallback(message: string) {
+  const normalized = message.toLowerCase();
+  return (
+    normalized.includes("@idempotent") ||
+    normalized.includes("idempotent directive") ||
+    normalized.includes("inventorychangeinput") ||
+    normalized.includes("inventoryquantityinput") ||
+    normalized.includes("changefromquantity") ||
+    normalized.includes("change_from_quantity_stale")
+  );
+}
+
+function restIdFromShopifyGid(gid: string, resourceName: string) {
+  const match = gid.match(/\/(\d+)$/);
+  if (!match) {
+    throw new Error(`Cannot convert ${resourceName} GID to REST ID: ${gid}`);
+  }
+
+  const id = Number(match[1]);
+  return Number.isSafeInteger(id) ? id : match[1];
+}
+
+function inventoryWriteStatus(write: InventoryWriteResult) {
+  if (write.error) return `error=${write.error}`;
+  return write.method === "REST_FALLBACK" ? "REST fallback ok" : "ok";
+}
+
 async function getPrimaryLocationId(
   client: ShopifyGraphQLClient
 ): Promise<string | null> {
@@ -315,13 +351,43 @@ async function ensureInventoryTracked(
   return errors?.length ? errors[0].message : null;
 }
 
+async function setInventoryLevelViaRest(
+  destClient: ShopifyGraphQLClient,
+  destInventoryItemId: string,
+  destLocationId: string,
+  quantity: number
+): Promise<InventoryWriteResult> {
+  try {
+    await destClient.restPost("inventory_levels/set.json", {
+      inventory_item_id: restIdFromShopifyGid(
+        destInventoryItemId,
+        "inventory item"
+      ),
+      location_id: restIdFromShopifyGid(destLocationId, "location"),
+      available: quantity,
+      disconnect_if_necessary: false,
+    });
+
+    console.log(
+      `[InventorySync] REST fallback ok for destination inventory item ${destInventoryItemId} at ${destLocationId}: ${quantity}`
+    );
+
+    return { error: null, method: "REST_FALLBACK" };
+  } catch (error) {
+    return {
+      error: `REST fallback failed: ${(error as Error).message}`,
+      method: "REST_FALLBACK",
+    };
+  }
+}
+
 async function setDestinationInventoryQuantity(
   destClient: ShopifyGraphQLClient,
   destVariantGid: string,
   quantity: number
-): Promise<string | null> {
+): Promise<InventoryWriteResult> {
   const destLocationId = await getPrimaryLocationId(destClient);
-  if (!destLocationId) return "No destination location found";
+  if (!destLocationId) return { error: "No destination location found" };
 
   const destVariantResult = await destClient.queryWithRetry(
     `#graphql
@@ -343,20 +409,22 @@ async function setDestinationInventoryQuantity(
     { id: destVariantGid, locationId: destLocationId }
   );
   if (destVariantResult.errors?.length) {
-    return destVariantResult.errors[0].message;
+    return { error: destVariantResult.errors[0].message };
   }
 
   const destInventoryItem =
     destVariantResult.data?.productVariant?.inventoryItem;
   const destInventoryItemId = destInventoryItem?.id;
-  if (!destInventoryItemId) return "Destination inventory item not found";
+  if (!destInventoryItemId) {
+    return { error: "Destination inventory item not found" };
+  }
 
   const trackingError = await ensureInventoryTracked(
     destClient,
     destInventoryItemId,
     !!destInventoryItem.tracked
   );
-  if (trackingError) return trackingError;
+  if (trackingError) return { error: trackingError };
 
   if (!destInventoryItem.inventoryLevel) {
     const activateResult = await destClient.queryWithRetry(
@@ -367,9 +435,14 @@ async function setDestinationInventoryQuantity(
         available: quantity,
       }
     );
-    if (activateResult.errors?.length) return activateResult.errors[0].message;
+    if (activateResult.errors?.length) {
+      return { error: activateResult.errors[0].message };
+    }
     const errors = activateResult.data?.inventoryActivate?.userErrors;
-    return errors?.length ? errors[0].message : null;
+    return {
+      error: errors?.length ? errors[0].message : null,
+      method: "ACTIVATE",
+    };
   }
 
   const changeFromQuantity = availableQuantityFromInventoryLevel(
@@ -381,35 +454,71 @@ async function setDestinationInventoryQuantity(
   );
 
   const delta = quantity - changeFromQuantity;
+  let writeMethod: InventoryWriteMethod = "GRAPHQL";
   if (delta === 0) {
     console.log(
       `[InventorySync] Destination inventory item ${destInventoryItemId} already has quantity ${quantity}; skipping adjustment`
     );
+    return { error: null, method: "NOOP" };
   } else {
-    const adjustResult = await destClient.queryWithRetry(
-      INVENTORY_ADJUST_QUANTITIES_MUTATION,
-      {
-        input: {
-          reason: "correction",
-          name: "available",
-          referenceDocumentUri: `dorec-store-sync://inventory-sync/${randomUUID()}`,
-          changes: [
-            {
-              inventoryItemId: destInventoryItemId,
-              locationId: destLocationId,
-              delta,
-              changeFromQuantity,
-            },
-          ],
-        },
-        idempotencyKey: randomUUID(),
+    const destShop = destClient.getShopDomain();
+
+    if (inventoryRestFallbackShops.has(destShop)) {
+      console.log(
+        `[InventorySync] Using REST fallback for ${destShop} inventory item ${destInventoryItemId}; GraphQL fallback flag already set`
+      );
+      const restWrite = await setInventoryLevelViaRest(
+        destClient,
+        destInventoryItemId,
+        destLocationId,
+        quantity
+      );
+      if (restWrite.error) return restWrite;
+      writeMethod = "REST_FALLBACK";
+    } else {
+      const adjustResult = await destClient.queryWithRetry(
+        INVENTORY_ADJUST_QUANTITIES_MUTATION,
+        {
+          input: {
+            reason: "correction",
+            name: "available",
+            referenceDocumentUri: `dorec-store-sync://inventory-sync/${randomUUID()}`,
+            changes: [
+              {
+                inventoryItemId: destInventoryItemId,
+                locationId: destLocationId,
+                delta,
+                changeFromQuantity,
+              },
+            ],
+          },
+          idempotencyKey: randomUUID(),
+        }
+      );
+
+      const graphqlError =
+        adjustResult.errors?.[0]?.message ||
+        adjustResult.data?.inventoryAdjustQuantities?.userErrors?.[0]?.message;
+
+      if (graphqlError) {
+        if (shouldUseRestInventoryFallback(graphqlError)) {
+          inventoryRestFallbackShops.add(destShop);
+          console.log(
+            `[InventorySync] GraphQL inventory write for ${destShop} hit the directive/compare guard; using REST fallback for this shop.`
+          );
+          const restWrite = await setInventoryLevelViaRest(
+            destClient,
+            destInventoryItemId,
+            destLocationId,
+            quantity
+          );
+          if (restWrite.error) return restWrite;
+          writeMethod = "REST_FALLBACK";
+        } else {
+          return { error: graphqlError };
+        }
       }
-    );
-
-    if (adjustResult.errors?.length) return adjustResult.errors[0].message;
-
-    const errors = adjustResult.data?.inventoryAdjustQuantities?.userErrors;
-    if (errors?.length) return errors[0].message;
+    }
   }
 
   const verifyResult = await destClient.queryWithRetry(
@@ -426,7 +535,9 @@ async function setDestinationInventoryQuantity(
     }`,
     { inventoryItemId: destInventoryItemId, locationId: destLocationId }
   );
-  if (verifyResult.errors?.length) return verifyResult.errors[0].message;
+  if (verifyResult.errors?.length) {
+    return { error: verifyResult.errors[0].message };
+  }
 
   const verifiedQuantity =
     verifyResult.data?.inventoryItem?.inventoryLevel?.quantities?.find(
@@ -434,10 +545,15 @@ async function setDestinationInventoryQuantity(
     )?.quantity;
 
   if (verifiedQuantity !== quantity) {
-    return `Inventory write did not stick: destination has ${verifiedQuantity ?? "unknown"}, expected ${quantity}`;
+    return {
+      error: `Inventory write did not stick: destination has ${verifiedQuantity ?? "unknown"}, expected ${quantity}`,
+    };
   }
 
-  return null;
+  return {
+    error: null,
+    method: writeMethod,
+  };
 }
 
 /**
@@ -537,14 +653,14 @@ export async function syncProductInventory(
       );
 
       console.log(
-        `[InventorySync] Product ${sourceProductGid} variant ${sourceVariant.id} -> ${variantMap.destVariantGid}: available=${sourceAvailable} ${error ? `error=${error}` : "ok"}`
+        `[InventorySync] Product ${sourceProductGid} variant ${sourceVariant.id} -> ${variantMap.destVariantGid}: available=${sourceAvailable} ${inventoryWriteStatus(error)}`
       );
 
       results.push({
-        success: !error,
+        success: !error.error,
         action: "UPDATE",
         sourceGid: sourceVariant.id,
-        error: error || undefined,
+        error: error.error || undefined,
         duration: Date.now() - startTime,
       });
     } catch (error) {
@@ -651,7 +767,7 @@ export async function syncInventoryItem(
     }
 
     if (!mapping?.destProductGid || !variantMap?.destVariantGid) {
-      console.warn(
+      console.log(
         `[InventorySync] Skipping inventory item ${inventoryItemId}; no destination variant mapping found for source variant ${sourceVariant.id}`
       );
       return {
@@ -675,14 +791,14 @@ export async function syncInventoryItem(
         sourceInventoryItem.inventoryLevels?.edges?.length
           ? availableQuantityFromLevels(sourceInventoryItem.inventoryLevels.edges)
           : available
-      } ${error ? `error=${error}` : "ok"}`
+      } ${inventoryWriteStatus(error)}`
     );
 
     return {
-      success: !error,
+      success: !error.error,
       action: "UPDATE",
       sourceGid: inventoryItemId,
-      error: error || undefined,
+      error: error.error || undefined,
       duration: Date.now() - startTime,
     };
   } catch (error) {

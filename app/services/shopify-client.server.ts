@@ -191,6 +191,45 @@ export class ShopifyGraphQLClient {
 
     return response.json();
   }
+
+  async restPost<T = any>(
+    path: string,
+    body: Record<string, unknown>
+  ): Promise<T> {
+    const cleanPath = path.replace(/^\/+/, "");
+    const url = `https://${this.shopDomain}/admin/api/${this.apiVersion}/${cleanPath}`;
+
+    const response = await fetch(url, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        "X-Shopify-Access-Token": this.accessToken,
+      },
+      body: JSON.stringify(body),
+    });
+
+    if (response.status === 429) {
+      const retryAfter = response.headers.get("Retry-After");
+      const waitTime = retryAfter ? parseInt(retryAfter, 10) * 1000 : 2000;
+      await sleep(waitTime);
+      return this.restPost<T>(path, body);
+    }
+
+    if (!response.ok) {
+      const errorBody = await response.text().catch(() => "");
+      if (response.status === 401 || response.status === 403) {
+        throw new Error(
+          `Shopify REST API error: ${response.status} Unauthorized for ${this.shopDomain} - the access token is invalid or expired. Reconnect this store (reinstall the app on it) to mint a fresh token.`
+        );
+      }
+      throw new Error(
+        `Shopify REST API error: ${response.status} ${response.statusText} (${this.shopDomain})${errorBody ? `: ${errorBody}` : ""}`
+      );
+    }
+
+    const text = await response.text();
+    return (text ? JSON.parse(text) : {}) as T;
+  }
 }
 
 /**
