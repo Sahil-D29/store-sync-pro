@@ -426,42 +426,96 @@ async function setDestinationInventoryQuantity(
   );
   if (trackingError) return { error: trackingError };
 
-  if (!destInventoryItem.inventoryLevel) {
-    const activateResult = await destClient.queryWithRetry(
-      INVENTORY_ACTIVATE_MUTATION,
-      {
-        inventoryItemId: destInventoryItemId,
-        locationId: destLocationId,
-        available: quantity,
-      }
-    );
-    if (activateResult.errors?.length) {
-      return { error: activateResult.errors[0].message };
-    }
-    const errors = activateResult.data?.inventoryActivate?.userErrors;
-    return {
-      error: errors?.length ? errors[0].message : null,
-      method: "ACTIVATE",
-    };
-  }
-
-  const changeFromQuantity = availableQuantityFromInventoryLevel(
-    destInventoryItem.inventoryLevel
-  );
-
-  console.log(
-    `[InventorySync] Setting destination inventory item ${destInventoryItemId} at ${destLocationId}: ${changeFromQuantity} -> ${quantity}`
-  );
-
-  const delta = quantity - changeFromQuantity;
+  const destShop = destClient.getShopDomain();
   let writeMethod: InventoryWriteMethod = "GRAPHQL";
-  if (delta === 0) {
-    console.log(
-      `[InventorySync] Destination inventory item ${destInventoryItemId} already has quantity ${quantity}; skipping adjustment`
-    );
-    return { error: null, method: "NOOP" };
+
+  if (!destInventoryItem.inventoryLevel) {
+    if (inventoryRestFallbackShops.has(destShop)) {
+      console.log(
+        `[InventorySync] Using REST fallback to activate ${destShop} inventory item ${destInventoryItemId}; GraphQL fallback flag already set`
+      );
+      const restWrite = await setInventoryLevelViaRest(
+        destClient,
+        destInventoryItemId,
+        destLocationId,
+        quantity
+      );
+      if (restWrite.error) return restWrite;
+      writeMethod = "REST_FALLBACK";
+    } else {
+      let activateResult;
+      try {
+        activateResult = await destClient.queryWithRetry(
+          INVENTORY_ACTIVATE_MUTATION,
+          {
+            inventoryItemId: destInventoryItemId,
+            locationId: destLocationId,
+            available: quantity,
+          }
+        );
+      } catch (error) {
+        const message = (error as Error).message;
+        if (!shouldUseRestInventoryFallback(message)) {
+          return { error: message };
+        }
+
+        inventoryRestFallbackShops.add(destShop);
+        console.log(
+          `[InventorySync] GraphQL inventory activation for ${destShop} threw the directive/compare guard; using REST fallback for this shop.`
+        );
+        const restWrite = await setInventoryLevelViaRest(
+          destClient,
+          destInventoryItemId,
+          destLocationId,
+          quantity
+        );
+        if (restWrite.error) return restWrite;
+        writeMethod = "REST_FALLBACK";
+      }
+
+      if (activateResult) {
+        const activateError =
+          activateResult.errors?.[0]?.message ||
+          activateResult.data?.inventoryActivate?.userErrors?.[0]?.message;
+
+        if (activateError) {
+          if (!shouldUseRestInventoryFallback(activateError)) {
+            return { error: activateError };
+          }
+
+          inventoryRestFallbackShops.add(destShop);
+          console.log(
+            `[InventorySync] GraphQL inventory activation for ${destShop} hit the directive/compare guard; using REST fallback for this shop.`
+          );
+          const restWrite = await setInventoryLevelViaRest(
+            destClient,
+            destInventoryItemId,
+            destLocationId,
+            quantity
+          );
+          if (restWrite.error) return restWrite;
+          writeMethod = "REST_FALLBACK";
+        } else {
+          writeMethod = "ACTIVATE";
+        }
+      }
+    }
   } else {
-    const destShop = destClient.getShopDomain();
+    const changeFromQuantity = availableQuantityFromInventoryLevel(
+      destInventoryItem.inventoryLevel
+    );
+
+    console.log(
+      `[InventorySync] Setting destination inventory item ${destInventoryItemId} at ${destLocationId}: ${changeFromQuantity} -> ${quantity}`
+    );
+
+    const delta = quantity - changeFromQuantity;
+    if (delta === 0) {
+      console.log(
+        `[InventorySync] Destination inventory item ${destInventoryItemId} already has quantity ${quantity}; skipping adjustment`
+      );
+      return { error: null, method: "NOOP" };
+    }
 
     if (inventoryRestFallbackShops.has(destShop)) {
       console.log(
@@ -476,46 +530,70 @@ async function setDestinationInventoryQuantity(
       if (restWrite.error) return restWrite;
       writeMethod = "REST_FALLBACK";
     } else {
-      const adjustResult = await destClient.queryWithRetry(
-        INVENTORY_ADJUST_QUANTITIES_MUTATION,
-        {
-          input: {
-            reason: "correction",
-            name: "available",
-            referenceDocumentUri: `dorec-store-sync://inventory-sync/${randomUUID()}`,
-            changes: [
-              {
-                inventoryItemId: destInventoryItemId,
-                locationId: destLocationId,
-                delta,
-                changeFromQuantity,
-              },
-            ],
-          },
-          idempotencyKey: randomUUID(),
+      let adjustResult;
+      try {
+        adjustResult = await destClient.queryWithRetry(
+          INVENTORY_ADJUST_QUANTITIES_MUTATION,
+          {
+            input: {
+              reason: "correction",
+              name: "available",
+              referenceDocumentUri: `dorec-store-sync://inventory-sync/${randomUUID()}`,
+              changes: [
+                {
+                  inventoryItemId: destInventoryItemId,
+                  locationId: destLocationId,
+                  delta,
+                  changeFromQuantity,
+                },
+              ],
+            },
+            idempotencyKey: randomUUID(),
+          }
+        );
+      } catch (error) {
+        const message = (error as Error).message;
+        if (!shouldUseRestInventoryFallback(message)) {
+          return { error: message };
         }
-      );
 
-      const graphqlError =
-        adjustResult.errors?.[0]?.message ||
-        adjustResult.data?.inventoryAdjustQuantities?.userErrors?.[0]?.message;
+        inventoryRestFallbackShops.add(destShop);
+        console.log(
+          `[InventorySync] GraphQL inventory write for ${destShop} threw the directive/compare guard; using REST fallback for this shop.`
+        );
+        const restWrite = await setInventoryLevelViaRest(
+          destClient,
+          destInventoryItemId,
+          destLocationId,
+          quantity
+        );
+        if (restWrite.error) return restWrite;
+        writeMethod = "REST_FALLBACK";
+      }
 
-      if (graphqlError) {
-        if (shouldUseRestInventoryFallback(graphqlError)) {
-          inventoryRestFallbackShops.add(destShop);
-          console.log(
-            `[InventorySync] GraphQL inventory write for ${destShop} hit the directive/compare guard; using REST fallback for this shop.`
-          );
-          const restWrite = await setInventoryLevelViaRest(
-            destClient,
-            destInventoryItemId,
-            destLocationId,
-            quantity
-          );
-          if (restWrite.error) return restWrite;
-          writeMethod = "REST_FALLBACK";
-        } else {
-          return { error: graphqlError };
+      if (adjustResult) {
+        const graphqlError =
+          adjustResult.errors?.[0]?.message ||
+          adjustResult.data?.inventoryAdjustQuantities?.userErrors?.[0]
+            ?.message;
+
+        if (graphqlError) {
+          if (shouldUseRestInventoryFallback(graphqlError)) {
+            inventoryRestFallbackShops.add(destShop);
+            console.log(
+              `[InventorySync] GraphQL inventory write for ${destShop} hit the directive/compare guard; using REST fallback for this shop.`
+            );
+            const restWrite = await setInventoryLevelViaRest(
+              destClient,
+              destInventoryItemId,
+              destLocationId,
+              quantity
+            );
+            if (restWrite.error) return restWrite;
+            writeMethod = "REST_FALLBACK";
+          } else {
+            return { error: graphqlError };
+          }
         }
       }
     }
