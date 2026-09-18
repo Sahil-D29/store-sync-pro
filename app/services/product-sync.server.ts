@@ -9,6 +9,7 @@ import { checkProductLimit, incrementProductCount } from "./billing.server";
 import {
   logSkippedMetafields,
   sanitizeMetafieldsForDestination,
+  toSingleLineText,
 } from "./metafield-sanitizer.server";
 
 interface SyncProductResult {
@@ -481,7 +482,16 @@ async function buildProductSetInput(
 
   // SEO
   if (syncRule.syncSeo && !excludedFields.includes("seo")) {
-    input.seo = sourceProduct.seo;
+    input.seo = sourceProduct.seo
+      ? {
+          title: sourceProduct.seo.title
+            ? toSingleLineText(sourceProduct.seo.title)
+            : null,
+          description: sourceProduct.seo.description
+            ? toSingleLineText(sourceProduct.seo.description)
+            : null,
+        }
+      : null;
   }
 
   // Product options

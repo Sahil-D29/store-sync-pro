@@ -44,6 +44,10 @@ function normalizeMetafieldType(type: string) {
   return LEGACY_METAFIELD_TYPES[type.toLowerCase()] || type;
 }
 
+export function toSingleLineText(value: string) {
+  return value.replace(/\s+/g, " ").trim();
+}
+
 function getSkipReason(metafield: MetafieldData): string | null {
   const value = String(metafield.value ?? "");
   const valueBytes = Buffer.byteLength(value, "utf8");
@@ -76,6 +80,11 @@ export function sanitizeMetafieldsForDestination(
       value: String(metafield.value ?? ""),
       type: normalizeMetafieldType(String(metafield.type || "")),
     };
+
+    if (normalizedMetafield.type === "single_line_text_field") {
+      normalizedMetafield.value = toSingleLineText(normalizedMetafield.value);
+    }
+
     const reason = getSkipReason(normalizedMetafield);
 
     if (reason) {
