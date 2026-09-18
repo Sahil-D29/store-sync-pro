@@ -399,7 +399,7 @@ model Subscription {
   shopifyShopGid   String?
   shopifyAppGid    String?
   planHandle       String?
-  productLimit     Int              @default(100)
+  productLimit     Int              @default(50)
   status           SubscriptionStatus @default(ACTIVE)
   trialEndsAt      DateTime?
   currentPeriodEnd DateTime?

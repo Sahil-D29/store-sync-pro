@@ -1,5 +1,6 @@
 import prisma from "../db.server";
-import { ShopifyGraphQLClient, createClientForStore } from "./shopify-client.server";
+import type { ShopifyGraphQLClient } from "./shopify-client.server";
+import { createClientForStore } from "./shopify-client.server";
 import { BULK_OPERATION_RUN_QUERY } from "../graphql/mutations";
 
 interface BulkSyncResult {
@@ -14,7 +15,8 @@ interface BulkSyncResult {
  * The result URL will be available via the bulk_operations/finish webhook.
  */
 export async function startBulkProductExport(
-  syncRuleId: string
+  syncRuleId: string,
+  ownerShop?: string
 ): Promise<BulkSyncResult> {
   const rule = await prisma.syncRule.findUnique({
     where: { id: syncRuleId },
@@ -22,6 +24,9 @@ export async function startBulkProductExport(
   });
 
   if (!rule) return { success: false, error: "Sync rule not found" };
+  if (ownerShop && rule.ownerShop !== ownerShop) {
+    return { success: false, error: "Sync rule not found" };
+  }
 
   const sourceClient = await createClientForStore(rule.sourceStoreId);
 
@@ -258,11 +263,28 @@ export async function processBulkResults(
 }
 
 /**
- * Get all bulk operations for a store
+ * Get all bulk operations for an account owner or a source store.
  */
-export async function getBulkOperations(shopDomain?: string) {
+export async function getBulkOperations(ownerShop?: string) {
   const where: any = {};
-  if (shopDomain) where.shopDomain = shopDomain;
+
+  if (ownerShop) {
+    const [storeDomains, ruleIds] = await Promise.all([
+      prisma.connectedStore.findMany({
+        where: { ownerShop },
+        select: { shopDomain: true },
+      }),
+      prisma.syncRule.findMany({
+        where: { ownerShop },
+        select: { id: true },
+      }),
+    ]);
+
+    where.OR = [
+      { shopDomain: { in: storeDomains.map((store) => store.shopDomain) } },
+      { syncRuleId: { in: ruleIds.map((rule) => rule.id) } },
+    ];
+  }
 
   return prisma.bulkOperationTracker.findMany({
     where,

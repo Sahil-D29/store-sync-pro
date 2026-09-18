@@ -4,7 +4,6 @@ import { json } from "@remix-run/node";
 import { useLoaderData, useSubmit, useNavigation } from "@remix-run/react";
 import {
   Page,
-  Layout,
   Card,
   BlockStack,
   Text,
@@ -13,7 +12,6 @@ import {
   Button,
   Select,
   Banner,
-  ProgressBar,
   IndexTable,
   Box,
 } from "@shopify/polaris";
@@ -21,20 +19,22 @@ import { TitleBar } from "@shopify/app-bridge-react";
 import { authenticate } from "../shopify.server";
 import prisma from "../db.server";
 import { startBulkProductExport, getBulkOperations } from "../services/bulk-operations.server";
+import { getAccountShop } from "../services/store-management.server";
 
 export const loader = async ({ request }: LoaderFunctionArgs) => {
-  await authenticate.admin(request);
+  const { session } = await authenticate.admin(request);
+  const ownerShop = await getAccountShop(session.shop);
 
   const [syncRules, operations] = await Promise.all([
     prisma.syncRule.findMany({
-      where: { isActive: true },
+      where: { ownerShop, isActive: true },
       include: {
         sourceStore: { select: { shopDomain: true, shopName: true } },
         destStore: { select: { shopDomain: true, shopName: true } },
       },
       orderBy: { createdAt: "desc" },
     }),
-    getBulkOperations(),
+    getBulkOperations(ownerShop),
   ]);
 
   return json({
@@ -53,7 +53,8 @@ export const loader = async ({ request }: LoaderFunctionArgs) => {
 };
 
 export const action = async ({ request }: ActionFunctionArgs) => {
-  await authenticate.admin(request);
+  const { session } = await authenticate.admin(request);
+  const ownerShop = await getAccountShop(session.shop);
   const formData = await request.formData();
   const intent = formData.get("intent") as string;
 
@@ -64,7 +65,7 @@ export const action = async ({ request }: ActionFunctionArgs) => {
         return json({ error: "Please select a sync rule" }, { status: 400 });
       }
 
-      const result = await startBulkProductExport(syncRuleId);
+      const result = await startBulkProductExport(syncRuleId, ownerShop);
       if (!result.success) {
         return json({ error: result.error }, { status: 400 });
       }

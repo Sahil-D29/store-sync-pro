@@ -30,7 +30,7 @@ const EMPTY_STATS = {
   successCount: 0,
   errorCount: 0,
   syncedProducts: 0,
-  productLimit: 100,
+  productLimit: 50,
   plan: "FREE",
 };
 
