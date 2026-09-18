@@ -22,12 +22,19 @@ interface FailedSyncItem {
 export async function getFailedSyncs(options?: {
   syncRuleId?: string;
   resourceType?: string;
+  ownerShop?: string;
   limit?: number;
   offset?: number;
 }): Promise<{ items: FailedSyncItem[]; total: number }> {
   const where: any = { status: "FAILED" };
   if (options?.syncRuleId) where.syncRuleId = options.syncRuleId;
   if (options?.resourceType) where.resourceType = options.resourceType;
+  if (options?.ownerShop) {
+    where.OR = [
+      { syncRule: { ownerShop: options.ownerShop } },
+      { store: { ownerShop: options.ownerShop } },
+    ];
+  }
 
   const [items, total] = await Promise.all([
     prisma.syncLog.findMany({
@@ -61,13 +68,27 @@ export async function getFailedSyncs(options?: {
 /**
  * Retry a specific failed sync log entry.
  */
-export async function retrySyncItem(logId: string): Promise<{ success: boolean; error?: string }> {
+export async function retrySyncItem(
+  logId: string,
+  ownerShop?: string
+): Promise<{ success: boolean; error?: string }> {
   const logEntry = await prisma.syncLog.findUnique({
     where: { id: logId },
+    include: {
+      syncRule: { select: { ownerShop: true } },
+      store: { select: { ownerShop: true } },
+    },
   });
 
   if (!logEntry) return { success: false, error: "Log entry not found" };
   if (logEntry.status !== "FAILED") return { success: false, error: "Only failed items can be retried" };
+  if (
+    ownerShop &&
+    logEntry.syncRule?.ownerShop !== ownerShop &&
+    logEntry.store?.ownerShop !== ownerShop
+  ) {
+    return { success: false, error: "Log entry not found" };
+  }
 
   try {
     switch (logEntry.resourceType) {
@@ -137,7 +158,18 @@ export async function retrySyncItem(logId: string): Promise<{ success: boolean; 
 /**
  * Retry all failed syncs for a specific sync rule.
  */
-export async function retryAllForRule(syncRuleId: string): Promise<{ queued: number; errors: number }> {
+export async function retryAllForRule(
+  syncRuleId: string,
+  ownerShop?: string
+): Promise<{ queued: number; errors: number }> {
+  if (ownerShop) {
+    const rule = await prisma.syncRule.findFirst({
+      where: { id: syncRuleId, ownerShop },
+      select: { id: true },
+    });
+    if (!rule) return { queued: 0, errors: 1 };
+  }
+
   const failedLogs = await prisma.syncLog.findMany({
     where: { syncRuleId, status: "FAILED" },
     orderBy: { createdAt: "desc" },
@@ -148,7 +180,7 @@ export async function retryAllForRule(syncRuleId: string): Promise<{ queued: num
   let errors = 0;
 
   for (const entry of failedLogs) {
-    const result = await retrySyncItem(entry.id);
+    const result = await retrySyncItem(entry.id, ownerShop);
     if (result.success) queued++;
     else errors++;
   }
@@ -160,9 +192,16 @@ export async function retryAllForRule(syncRuleId: string): Promise<{ queued: num
 /**
  * Retry all failed syncs across all rules.
  */
-export async function retryAllFailed(): Promise<{ queued: number; errors: number }> {
+export async function retryAllFailed(
+  ownerShop?: string
+): Promise<{ queued: number; errors: number }> {
+  const where: any = { status: "FAILED", syncRuleId: { not: null } };
+  if (ownerShop) {
+    where.syncRule = { ownerShop };
+  }
+
   const failedLogs = await prisma.syncLog.findMany({
-    where: { status: "FAILED", syncRuleId: { not: null } },
+    where,
     orderBy: { createdAt: "desc" },
     take: 1000,
   });
@@ -171,7 +210,7 @@ export async function retryAllFailed(): Promise<{ queued: number; errors: number
   let errors = 0;
 
   for (const entry of failedLogs) {
-    const result = await retrySyncItem(entry.id);
+    const result = await retrySyncItem(entry.id, ownerShop);
     if (result.success) queued++;
     else errors++;
   }
@@ -196,23 +235,31 @@ export async function cleanupOldLogs(daysToKeep: number = 30): Promise<number> {
 /**
  * Get retry statistics.
  */
-export async function getRetryStats(): Promise<{
+export async function getRetryStats(ownerShop?: string): Promise<{
   totalFailed: number;
   retrying: number;
   failedByType: Record<string, number>;
   failedByRule: Array<{ ruleId: string; ruleName: string; count: number }>;
 }> {
+  const scopedWhere: any = {};
+  if (ownerShop) {
+    scopedWhere.OR = [
+      { syncRule: { ownerShop } },
+      { store: { ownerShop } },
+    ];
+  }
+
   const [totalFailed, retrying, failedByType, failedByRule] = await Promise.all([
-    prisma.syncLog.count({ where: { status: "FAILED" } }),
-    prisma.syncLog.count({ where: { status: "RETRYING" } }),
+    prisma.syncLog.count({ where: { ...scopedWhere, status: "FAILED" } }),
+    prisma.syncLog.count({ where: { ...scopedWhere, status: "RETRYING" } }),
     prisma.syncLog.groupBy({
       by: ["resourceType"],
-      where: { status: "FAILED" },
+      where: { ...scopedWhere, status: "FAILED" },
       _count: true,
     }),
     prisma.syncLog.groupBy({
       by: ["syncRuleId"],
-      where: { status: "FAILED", syncRuleId: { not: null } },
+      where: { ...scopedWhere, status: "FAILED", syncRuleId: { not: null } },
       _count: true,
       orderBy: { _count: { syncRuleId: "desc" } },
       take: 10,

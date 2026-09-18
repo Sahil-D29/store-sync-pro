@@ -10,12 +10,9 @@ import {
   Badge,
   Button,
   Banner,
-  Box,
   IndexTable,
-  Select,
 } from "@shopify/polaris";
 import { TitleBar } from "@shopify/app-bridge-react";
-import { useState } from "react";
 import { authenticate } from "../shopify.server";
 import {
   getFailedSyncs,
@@ -24,41 +21,39 @@ import {
   retryAllForRule,
   getRetryStats,
 } from "../services/retry-manager.server";
-import prisma from "../db.server";
+import { getAccountShop } from "../services/store-management.server";
 
 export const loader = async ({ request }: LoaderFunctionArgs) => {
-  await authenticate.admin(request);
+  const { session } = await authenticate.admin(request);
+  const ownerShop = await getAccountShop(session.shop);
 
   const url = new URL(request.url);
   const resourceType = url.searchParams.get("resourceType") || undefined;
   const syncRuleId = url.searchParams.get("syncRuleId") || undefined;
 
-  const [failedSyncs, stats, syncRules] = await Promise.all([
-    getFailedSyncs({ resourceType, syncRuleId, limit: 50 }),
-    getRetryStats(),
-    prisma.syncRule.findMany({
-      select: { id: true, name: true },
-      orderBy: { name: "asc" },
-    }),
+  const [failedSyncs, stats] = await Promise.all([
+    getFailedSyncs({ ownerShop, resourceType, syncRuleId, limit: 50 }),
+    getRetryStats(ownerShop),
   ]);
 
-  return json({ failedSyncs, stats, syncRules });
+  return json({ failedSyncs, stats });
 };
 
 export const action = async ({ request }: ActionFunctionArgs) => {
-  await authenticate.admin(request);
+  const { session } = await authenticate.admin(request);
+  const ownerShop = await getAccountShop(session.shop);
   const formData = await request.formData();
   const intent = formData.get("intent") as string;
 
   switch (intent) {
     case "retry-one": {
       const logId = formData.get("logId") as string;
-      const result = await retrySyncItem(logId);
+      const result = await retrySyncItem(logId, ownerShop);
       return json(result);
     }
 
     case "retry-all": {
-      const result = await retryAllFailed();
+      const result = await retryAllFailed(ownerShop);
       return json({
         success: true,
         message: `Queued ${result.queued} retries, ${result.errors} errors`,
@@ -67,7 +62,7 @@ export const action = async ({ request }: ActionFunctionArgs) => {
 
     case "retry-rule": {
       const syncRuleId = formData.get("syncRuleId") as string;
-      const result = await retryAllForRule(syncRuleId);
+      const result = await retryAllForRule(syncRuleId, ownerShop);
       return json({
         success: true,
         message: `Queued ${result.queued} retries for rule, ${result.errors} errors`,
@@ -80,13 +75,10 @@ export const action = async ({ request }: ActionFunctionArgs) => {
 };
 
 export default function RetryDashboardPage() {
-  const { failedSyncs, stats, syncRules } = useLoaderData<typeof loader>();
+  const { failedSyncs, stats } = useLoaderData<typeof loader>();
   const submit = useSubmit();
   const navigation = useNavigation();
   const isSubmitting = navigation.state === "submitting";
-
-  const [filterRule, setFilterRule] = useState("");
-  const [filterType, setFilterType] = useState("");
 
   return (
     <Page>
