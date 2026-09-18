@@ -25,6 +25,9 @@ const REFERENCE_METAFIELD_TYPES = [
   "collection_reference",
   "page_reference",
 ];
+const LEGACY_METAFIELD_TYPES: Record<string, string> = {
+  string: "single_line_text_field",
+};
 
 function metafieldName(metafield: MetafieldData) {
   return `${metafield.namespace}.${metafield.key}`;
@@ -35,6 +38,10 @@ function isReferenceMetafieldType(type: string) {
   return REFERENCE_METAFIELD_TYPES.some((referenceType) =>
     normalized.includes(referenceType)
   );
+}
+
+function normalizeMetafieldType(type: string) {
+  return LEGACY_METAFIELD_TYPES[type.toLowerCase()] || type;
 }
 
 function getSkipReason(metafield: MetafieldData): string | null {
@@ -67,7 +74,7 @@ export function sanitizeMetafieldsForDestination(
       namespace: metafield.namespace,
       key: metafield.key,
       value: String(metafield.value ?? ""),
-      type: metafield.type,
+      type: normalizeMetafieldType(String(metafield.type || "")),
     };
     const reason = getSkipReason(normalizedMetafield);
 
