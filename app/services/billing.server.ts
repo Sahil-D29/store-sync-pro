@@ -628,15 +628,11 @@ export async function checkProductLimit(
 }> {
   const subscription = await getSubscription(shopDomain);
 
-  let usage = await prisma.usageTracker.findUnique({
+  const usage = await prisma.usageTracker.upsert({
     where: { shopDomain },
+    update: {},
+    create: { shopDomain, syncedProductCount: 0 },
   });
-
-  if (!usage) {
-    usage = await prisma.usageTracker.create({
-      data: { shopDomain, syncedProductCount: 0 },
-    });
-  }
 
   return {
     allowed:
