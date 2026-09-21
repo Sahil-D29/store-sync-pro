@@ -694,7 +694,7 @@ export async function syncCollection(
           )
         : await destClient.queryWithRetry(
             COLLECTION_UPDATE_DETAILS_MUTATION,
-            { collection: collectionInput }
+            { input: collectionInput }
           );
 
       if (updateResult.errors?.length) {
@@ -1080,7 +1080,7 @@ async function ensureCollectionManualSort(
     const updateResult: any = await destClient.queryWithRetry(
       COLLECTION_UPDATE_DETAILS_MUTATION,
       {
-        collection: {
+        input: {
           id: destCollectionGid,
           sortOrder: "MANUAL",
         },

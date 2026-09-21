@@ -47,6 +47,7 @@ export const COLLECTION_UPDATE_MUTATION = `#graphql
         id
         title
         handle
+        sortOrder
       }
       userErrors {
         field
@@ -57,8 +58,8 @@ export const COLLECTION_UPDATE_MUTATION = `#graphql
 `;
 
 export const COLLECTION_UPDATE_DETAILS_MUTATION = `#graphql
-  mutation CollectionUpdateDetails($collection: CollectionUpdateInput!) {
-    collectionUpdate(collection: $collection) {
+  mutation CollectionUpdateDetails($input: CollectionInput!) {
+    collectionUpdate(input: $input) {
       collection {
         id
         title
