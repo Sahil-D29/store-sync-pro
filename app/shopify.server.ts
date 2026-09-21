@@ -7,7 +7,10 @@ import {
 import { PrismaSessionStorage } from "@shopify/shopify-app-session-storage-prisma";
 import prisma from "./db.server";
 import { ensureStoreRegistered } from "./services/store-management.server";
+import { startRealtimeCollectionPolling } from "./services/realtime-collection-poller.server";
 import { withDbRetry } from "./utils/db-retry.server";
+
+startRealtimeCollectionPolling();
 
 const shopify = shopifyApp({
   apiKey: process.env.SHOPIFY_API_KEY,
