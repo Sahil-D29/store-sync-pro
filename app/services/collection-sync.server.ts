@@ -618,9 +618,14 @@ export async function syncCollection(
       seo: sourceCollection.seo,
     };
 
-    // Sync the ordering mode (MANUAL, BEST_SELLING, ALPHA_ASC, PRICE_DESC, ...)
-    // so the destination collection orders products the same way as the source.
-    if (sourceCollection.sortOrder) {
+    // For custom collections, exact alignment means preserving the source's
+    // current product sequence, even when the source default sort is dynamic
+    // (for example BEST_SELLING). Dynamic sorts are recalculated independently
+    // per store, so the destination must be MANUAL before we can reorder it to
+    // match the source sequence.
+    if (!sourceCollection.ruleSet) {
+      collectionInput.sortOrder = "MANUAL";
+    } else if (sourceCollection.sortOrder) {
       collectionInput.sortOrder = sourceCollection.sortOrder;
     }
 
@@ -987,9 +992,10 @@ async function syncCollectionProducts(
     await waitForJob(destClient, jobId);
   }
 
-  // Preserve the exact manual order. Reorder is only meaningful (and only
-  // permitted) when the collection uses MANUAL sort order.
-  if (sourceCollection.sortOrder === "MANUAL" && desiredDestIds.length) {
+  // Preserve the exact source order. The destination collection is forced to
+  // MANUAL for custom collections so this also aligns source collections whose
+  // current default order is dynamic, such as BEST_SELLING.
+  if (desiredDestIds.length) {
     const moves = desiredDestIds.map((id, index) => ({
       id,
       newPosition: String(index),
