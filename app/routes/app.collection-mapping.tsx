@@ -882,7 +882,7 @@ export default function CollectionMappingPage() {
                 options={TRIGGER_MODE_OPTIONS}
                 value={triggerMode}
                 onChange={setTriggerMode}
-                helpText="Live syncs automatically whenever the source collection changes. Manual only syncs when you click Sync now."
+                helpText="Live syncs automatically. Some collection order/alignment changes can take up to 1 minute to appear because Shopify may not send an instant webhook for those changes. Manual only syncs when you click Sync now."
               />
 
               <BlockStack gap="150">
@@ -1011,13 +1011,20 @@ export default function CollectionMappingPage() {
                   </IndexTable.Cell>
                   <IndexTable.Cell>
                     <div onClick={(e) => e.stopPropagation()}>
-                      <Select
-                        label=""
-                        labelHidden
-                        options={TRIGGER_MODE_OPTIONS}
-                        value={mapping.triggerMode}
-                        onChange={(v) => handleTriggerModeChange(mapping.id, v)}
-                      />
+                      <BlockStack gap="100">
+                        <Select
+                          label=""
+                          labelHidden
+                          options={TRIGGER_MODE_OPTIONS}
+                          value={mapping.triggerMode}
+                          onChange={(v) => handleTriggerModeChange(mapping.id, v)}
+                        />
+                        {mapping.triggerMode === "REALTIME" && (
+                          <Text as="p" variant="bodySm" tone="subdued">
+                            Order changes may take up to 1 minute.
+                          </Text>
+                        )}
+                      </BlockStack>
                     </div>
                   </IndexTable.Cell>
                   <IndexTable.Cell>

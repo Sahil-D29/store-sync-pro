@@ -2,8 +2,8 @@ import prisma from "../db.server";
 import { createClientForStore } from "./shopify-client.server";
 import { syncCollection } from "./collection-sync.server";
 
-const POLL_INTERVAL_MS = Number(process.env.COLLECTION_REALTIME_POLL_MS || 120_000);
-const STALE_AFTER_MS = Number(process.env.COLLECTION_REALTIME_STALE_MS || 120_000);
+const POLL_INTERVAL_MS = Number(process.env.COLLECTION_REALTIME_POLL_MS || 60_000);
+const STALE_AFTER_MS = Number(process.env.COLLECTION_REALTIME_STALE_MS || 60_000);
 const MAX_MAPPINGS_PER_TICK = Number(process.env.COLLECTION_REALTIME_POLL_LIMIT || 10);
 
 declare global {
