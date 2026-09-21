@@ -57,6 +57,18 @@ function parseVariantMappings(value: string | null | undefined): VariantMapping[
   }
 }
 
+function parseGidList(value: string | null | undefined): string[] {
+  if (!value) return [];
+  try {
+    const parsed = JSON.parse(value);
+    return Array.isArray(parsed)
+      ? parsed.filter((id): id is string => typeof id === "string" && id.length > 0)
+      : [];
+  } catch {
+    return [];
+  }
+}
+
 function availableFromLevels(levels: Array<{ node?: { quantities?: Array<{ name: string; quantity: number }> } }>) {
   return levels.reduce((total, edge) => {
     const available =
@@ -112,6 +124,69 @@ async function fetchInventoryItemSnapshot(
     productGid,
     available: levels.length ? availableFromLevels(levels) : fallbackAvailable,
   };
+}
+
+async function fetchSourceProductScope(
+  client: ShopifyGraphQLClient,
+  sourceProductGid: string
+): Promise<{ tags: string[]; collectionIds: string[] } | null> {
+  const result = await client.queryWithRetry(
+    `#graphql
+    query GetInventoryScopeProduct($id: ID!) {
+      product(id: $id) {
+        id
+        tags
+        collections(first: 100) {
+          nodes {
+            id
+          }
+        }
+      }
+    }`,
+    { id: sourceProductGid }
+  );
+
+  const product = result.data?.product;
+  if (!product?.id) return null;
+  return {
+    tags: product.tags || [],
+    collectionIds: (product.collections?.nodes || [])
+      .map((collection: { id?: string }) => collection.id)
+      .filter(Boolean),
+  };
+}
+
+async function matchesInventoryRuleScope(
+  rule: RuleWithStores,
+  sourceProductGid: string,
+  sourceClient: ShopifyGraphQLClient
+) {
+  if (rule.filterType === "ALL") return true;
+
+  if (rule.filterType === "SELECTED_PRODUCTS") {
+    return parseGidList(rule.filterProductIds).includes(sourceProductGid);
+  }
+
+  const scope = await fetchSourceProductScope(sourceClient, sourceProductGid);
+  if (!scope) return false;
+
+  if (rule.filterType === "SELECTED_COLLECTIONS") {
+    const selectedCollections = parseGidList(rule.filterCollectionIds);
+    if (!selectedCollections.length) return false;
+    return selectedCollections.some((collectionId) => scope.collectionIds.includes(collectionId));
+  }
+
+  if (rule.filterType === "BY_TAGS") {
+    const selectedTags = (rule.filterTags || "")
+      .split(",")
+      .map((tag) => tag.trim().toLowerCase())
+      .filter(Boolean);
+    if (!selectedTags.length) return false;
+    const productTags = scope.tags.map((tag) => tag.toLowerCase());
+    return selectedTags.some((tag) => productTags.includes(tag));
+  }
+
+  return false;
 }
 
 function findSourceToDestVariant(mapping: ProductMapping, sourceVariantGid: string) {
@@ -203,6 +278,11 @@ async function syncSourceToDestination(rule: RuleWithStores, snapshot: Inventory
   });
   if (!mapping) return false;
 
+  const sourceClient = await createClientForStore(rule.sourceStoreId);
+  if (!(await matchesInventoryRuleScope(rule, mapping.sourceProductGid, sourceClient))) {
+    return false;
+  }
+
   const targetVariantGid = findSourceToDestVariant(mapping, snapshot.variantGid);
   if (!targetVariantGid) return false;
 
@@ -232,6 +312,11 @@ async function syncDestinationToSource(rule: RuleWithStores, snapshot: Inventory
     )
   );
   if (!mapping) return false;
+
+  const sourceClient = await createClientForStore(rule.sourceStoreId);
+  if (!(await matchesInventoryRuleScope(rule, mapping.sourceProductGid, sourceClient))) {
+    return false;
+  }
 
   const targetVariantGid = findDestToSourceVariant(mapping, snapshot.variantGid);
   if (!targetVariantGid) return false;
@@ -309,6 +394,10 @@ export async function pollInventorySyncRules() {
 
     const sourceClient = await createClientForStore(rule.sourceStoreId);
     for (const mapping of mappings) {
+      if (!(await matchesInventoryRuleScope(rule, mapping.sourceProductGid, sourceClient))) {
+        continue;
+      }
+
       for (const variantMap of parseVariantMappings(mapping.variantMappings)) {
         if (!variantMap.sourceVariantGid || !variantMap.destVariantGid) continue;
         const result = await sourceClient.queryWithRetry(

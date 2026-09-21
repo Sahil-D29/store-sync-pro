@@ -31,7 +31,6 @@ export default function App() {
         <Link to="/app/inventory-sync">Inventory Sync</Link>
         <Link to="/app/price-rules">Price Rules</Link>
         <Link to="/app/collection-mapping">Collections</Link>
-        <Link to="/app/bulk-sync">Bulk Sync</Link>
         <Link to="/app/analytics">Analytics</Link>
         <Link to="/app/activity">Activity</Link>
         <Link to="/app/retry-dashboard">Retries</Link>

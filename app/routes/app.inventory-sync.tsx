@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useCallback, useState } from "react";
 import type { ActionFunctionArgs, LoaderFunctionArgs } from "@remix-run/node";
 import { json } from "@remix-run/node";
 import { useLoaderData, useSubmit, useNavigation } from "@remix-run/react";
@@ -13,6 +13,9 @@ import {
   Badge,
   Banner,
   IndexTable,
+  TextField,
+  Tag,
+  Box,
 } from "@shopify/polaris";
 import { TitleBar } from "@shopify/app-bridge-react";
 import { authenticate } from "../shopify.server";
@@ -24,6 +27,23 @@ const DIRECTION_OPTIONS = [
   { label: "Two-way instant sync", value: "TWO_WAY" },
   { label: "One-way: source to destination", value: "ONE_WAY" },
 ];
+
+const FILTER_OPTIONS = [
+  { label: "All mapped products", value: "ALL" },
+  { label: "Selected products", value: "SELECTED_PRODUCTS" },
+  { label: "Selected collections", value: "SELECTED_COLLECTIONS" },
+  { label: "By tags", value: "BY_TAGS" },
+];
+
+function safeJsonArray(value: string | null | undefined): string[] {
+  if (!value) return [];
+  try {
+    const parsed = JSON.parse(value);
+    return Array.isArray(parsed) ? parsed : [];
+  } catch {
+    return [];
+  }
+}
 
 export const loader = async ({ request }: LoaderFunctionArgs) => {
   const { session } = await authenticate.admin(request);
@@ -46,6 +66,7 @@ export const loader = async ({ request }: LoaderFunctionArgs) => {
   ]);
 
   return json({
+    currentShop: session.shop,
     stores,
     rules: rules.map((rule) => ({
       ...rule,
@@ -67,6 +88,10 @@ export const action = async ({ request }: ActionFunctionArgs) => {
       const sourceStoreId = formData.get("sourceStoreId") as string;
       const destStoreId = formData.get("destStoreId") as string;
       const direction = formData.get("direction") === "ONE_WAY" ? "ONE_WAY" : "TWO_WAY";
+      const filterType = (formData.get("filterType") as string) || "ALL";
+      const filterProductIds = (formData.get("filterProductIds") as string) || null;
+      const filterCollectionIds = (formData.get("filterCollectionIds") as string) || null;
+      const filterTags = (formData.get("filterTags") as string) || null;
 
       if (!sourceStoreId || !destStoreId || sourceStoreId === destStoreId) {
         return json({ error: "Choose two different stores." }, { status: 400 });
@@ -86,12 +111,24 @@ export const action = async ({ request }: ActionFunctionArgs) => {
             destStoreId,
           },
         },
-        update: { direction, isActive: true, lastError: null },
+        update: {
+          direction,
+          filterType: filterType as any,
+          filterProductIds,
+          filterCollectionIds,
+          filterTags,
+          isActive: true,
+          lastError: null,
+        },
         create: {
           ownerShop,
           sourceStoreId,
           destStoreId,
           direction,
+          filterType: filterType as any,
+          filterProductIds,
+          filterCollectionIds,
+          filterTags,
         },
       });
 
@@ -131,13 +168,19 @@ export const action = async ({ request }: ActionFunctionArgs) => {
 };
 
 export default function InventorySyncPage() {
-  const { stores, rules } = useLoaderData<typeof loader>();
+  const { currentShop, stores, rules } = useLoaderData<typeof loader>();
   const submit = useSubmit();
   const navigation = useNavigation();
   const isSubmitting = navigation.state === "submitting";
   const [sourceStoreId, setSourceStoreId] = useState(stores.find((store) => store.isBaseStore)?.id || "");
   const [destStoreId, setDestStoreId] = useState(stores.find((store) => !store.isBaseStore)?.id || "");
   const [direction, setDirection] = useState("TWO_WAY");
+  const [filterType, setFilterType] = useState("ALL");
+  const [filterTags, setFilterTags] = useState("");
+  const [filterProductIds, setFilterProductIds] = useState<Array<{ id: string; title: string }>>([]);
+  const [filterCollectionIds, setFilterCollectionIds] = useState<Array<{ id: string; title: string }>>([]);
+  const sourceStore = stores.find((store) => store.id === sourceStoreId);
+  const canPickFromCurrentShop = !!sourceStore && sourceStore.shopDomain === currentShop;
 
   const storeOptions = [
     { label: "Select store...", value: "" },
@@ -149,7 +192,16 @@ export default function InventorySyncPage() {
 
   const createRule = () => {
     submit(
-      { intent: "create", sourceStoreId, destStoreId, direction },
+      {
+        intent: "create",
+        sourceStoreId,
+        destStoreId,
+        direction,
+        filterType,
+        filterProductIds: JSON.stringify(filterProductIds.map((product) => product.id)),
+        filterCollectionIds: JSON.stringify(filterCollectionIds.map((collection) => collection.id)),
+        filterTags,
+      },
       { method: "POST" }
     );
   };
@@ -163,6 +215,53 @@ export default function InventorySyncPage() {
 
   const deleteRule = (ruleId: string) => {
     submit({ intent: "delete", ruleId }, { method: "POST" });
+  };
+
+  const openProductPicker = useCallback(async () => {
+    try {
+      const selected = await (window as any).shopify.resourcePicker({
+        type: "product",
+        action: "select",
+        multiple: true,
+        selectionIds: filterProductIds.map((product) => ({ id: product.id })),
+      });
+      if (selected) {
+        setFilterProductIds(selected.map((product: any) => ({ id: product.id, title: product.title })));
+      }
+    } catch (error) {
+      console.error("Inventory product picker error:", error);
+    }
+  }, [filterProductIds]);
+
+  const openCollectionPicker = useCallback(async () => {
+    try {
+      const selected = await (window as any).shopify.resourcePicker({
+        type: "collection",
+        action: "select",
+        multiple: true,
+        selectionIds: filterCollectionIds.map((collection) => ({ id: collection.id })),
+      });
+      if (selected) {
+        setFilterCollectionIds(selected.map((collection: any) => ({ id: collection.id, title: collection.title })));
+      }
+    } catch (error) {
+      console.error("Inventory collection picker error:", error);
+    }
+  }, [filterCollectionIds]);
+
+  const filterSummary = (rule: typeof rules[number]) => {
+    if (rule.filterType === "SELECTED_PRODUCTS") {
+      const count = safeJsonArray(rule.filterProductIds).length;
+      return `${count} selected product${count === 1 ? "" : "s"}`;
+    }
+    if (rule.filterType === "SELECTED_COLLECTIONS") {
+      const count = safeJsonArray(rule.filterCollectionIds).length;
+      return `${count} selected collection${count === 1 ? "" : "s"}`;
+    }
+    if (rule.filterType === "BY_TAGS") {
+      return rule.filterTags || "No tags";
+    }
+    return "All mapped products";
   };
 
   return (
@@ -182,10 +281,75 @@ export default function InventorySyncPage() {
               <Select label="Source store" options={storeOptions} value={sourceStoreId} onChange={setSourceStoreId} />
               <Select label="Destination store" options={storeOptions} value={destStoreId} onChange={setDestStoreId} />
               <Select label="Direction" options={DIRECTION_OPTIONS} value={direction} onChange={setDirection} />
+              <Box minWidth="220px">
+                <Select label="Products to sync" options={FILTER_OPTIONS} value={filterType} onChange={setFilterType} />
+              </Box>
               <Button variant="primary" onClick={createRule} loading={isSubmitting} disabled={!sourceStoreId || !destStoreId || sourceStoreId === destStoreId}>
                 Save rule
               </Button>
             </InlineStack>
+
+            {filterType === "BY_TAGS" && (
+              <TextField
+                label="Tags"
+                value={filterTags}
+                onChange={setFilterTags}
+                placeholder="tag1, tag2"
+                autoComplete="off"
+                helpText="Inventory sync applies to mapped source products matching any tag."
+              />
+            )}
+
+            {filterType === "SELECTED_PRODUCTS" && (
+              <BlockStack gap="300">
+                {!canPickFromCurrentShop && (
+                  <Banner tone="warning">
+                    <p>Open the app from the selected source store admin to pick source products.</p>
+                  </Banner>
+                )}
+                <Button onClick={openProductPicker} disabled={!canPickFromCurrentShop || !sourceStoreId}>
+                  {filterProductIds.length > 0 ? "Change products" : "Select products"}
+                </Button>
+                <InlineStack gap="200" wrap>
+                  {filterProductIds.map((product) => (
+                    <Tag
+                      key={product.id}
+                      onRemove={() =>
+                        setFilterProductIds((selected) => selected.filter((item) => item.id !== product.id))
+                      }
+                    >
+                      {product.title}
+                    </Tag>
+                  ))}
+                </InlineStack>
+              </BlockStack>
+            )}
+
+            {filterType === "SELECTED_COLLECTIONS" && (
+              <BlockStack gap="300">
+                {!canPickFromCurrentShop && (
+                  <Banner tone="warning">
+                    <p>Open the app from the selected source store admin to pick source collections.</p>
+                  </Banner>
+                )}
+                <Button onClick={openCollectionPicker} disabled={!canPickFromCurrentShop || !sourceStoreId}>
+                  {filterCollectionIds.length > 0 ? "Change collections" : "Select collections"}
+                </Button>
+                <InlineStack gap="200" wrap>
+                  {filterCollectionIds.map((collection) => (
+                    <Tag
+                      key={collection.id}
+                      onRemove={() =>
+                        setFilterCollectionIds((selected) => selected.filter((item) => item.id !== collection.id))
+                      }
+                    >
+                      {collection.title}
+                    </Tag>
+                  ))}
+                </InlineStack>
+              </BlockStack>
+            )}
+
             <Text as="p" variant="bodySm" tone="subdued">
               Only mapped products/variants are synced. Product details, price, images, SEO, tags, and collections are not changed from this page.
             </Text>
@@ -198,6 +362,7 @@ export default function InventorySyncPage() {
               { title: "Source" },
               { title: "Destination" },
               { title: "Direction" },
+              { title: "Products" },
               { title: "Status" },
               { title: "Last synced" },
               { title: "Last error" },
@@ -211,6 +376,7 @@ export default function InventorySyncPage() {
                 <IndexTable.Cell>{rule.sourceStore.shopName || rule.sourceStore.shopDomain}</IndexTable.Cell>
                 <IndexTable.Cell>{rule.destStore.shopName || rule.destStore.shopDomain}</IndexTable.Cell>
                 <IndexTable.Cell>{rule.direction === "TWO_WAY" ? "Two-way" : "One-way"}</IndexTable.Cell>
+                <IndexTable.Cell>{filterSummary(rule)}</IndexTable.Cell>
                 <IndexTable.Cell>
                   <Badge tone={rule.isActive ? "success" : "attention"}>
                     {rule.isActive ? "Active" : "Paused"}

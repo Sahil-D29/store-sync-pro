@@ -284,6 +284,10 @@ model InventorySyncRule {
   destStore     ConnectedStore @relation("InventoryDestStore", fields: [destStoreId], references: [id], onDelete: Cascade)
 
   direction InventorySyncDirection @default(TWO_WAY)
+  filterType          FilterType @default(ALL)
+  filterCollectionIds String?
+  filterProductIds    String?
+  filterTags          String?
   isActive  Boolean                @default(true)
   lastRunAt DateTime?
   lastError String?

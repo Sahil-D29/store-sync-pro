@@ -277,6 +277,24 @@ export async function handleInventoryWebhook(
   locationId: string,
   available: number
 ): Promise<void> {
+  const inventoryOnlyRules = await prisma.inventorySyncRule.findMany({
+    where: {
+      isActive: true,
+      OR: [
+        { sourceStore: { shopDomain } },
+        { destStore: { shopDomain }, direction: "TWO_WAY" },
+      ],
+    },
+    select: { sourceStoreId: true, destStoreId: true, direction: true },
+  });
+  const inventoryOnlyPairs = new Set<string>();
+  for (const rule of inventoryOnlyRules) {
+    inventoryOnlyPairs.add(`${rule.sourceStoreId}:${rule.destStoreId}`);
+    if (rule.direction === "TWO_WAY") {
+      inventoryOnlyPairs.add(`${rule.destStoreId}:${rule.sourceStoreId}`);
+    }
+  }
+
   const syncRules = await prisma.syncRule.findMany({
     where: {
       sourceStore: { shopDomain },
@@ -289,7 +307,9 @@ export async function handleInventoryWebhook(
       destStore: true,
       priceRule: true,
     },
-  });
+  }).then((rules) =>
+    rules.filter((rule) => !inventoryOnlyPairs.has(`${rule.sourceStoreId}:${rule.destStoreId}`))
+  );
 
   const collectionMappings = await prisma.collectionMapping.findMany({
     where: {
@@ -306,6 +326,7 @@ export async function handleInventoryWebhook(
   const handledStorePairs = new Set<string>();
   const collectionMappingsToSync = collectionMappings.filter((mapping) => {
     const key = `${mapping.sourceStoreId}:${mapping.destStoreId}`;
+    if (inventoryOnlyPairs.has(key)) return false;
     if (handledStorePairs.has(key)) return false;
     handledStorePairs.add(key);
     return true;
