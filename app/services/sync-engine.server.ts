@@ -426,6 +426,25 @@ export async function handleInventoryWebhook(
 // Shopify rate limit = 1000 points, restore 50/sec. Each product uses ~10-20 points.
 // 3 concurrent keeps us safely under the limit.
 const SYNC_CONCURRENCY = 3;
+const MISSING_SOURCE_PRODUCT_MESSAGE =
+  "Selected product is missing from source store. Re-select it from the source store.";
+
+function parseGidList(value?: string | null): string[] {
+  if (!value) return [];
+  try {
+    const parsed = JSON.parse(value);
+    return Array.isArray(parsed)
+      ? parsed.filter((id): id is string => typeof id === "string" && id.length > 0)
+      : [];
+  } catch (error) {
+    console.error("[SyncEngine] Failed to parse selected GID list:", error);
+    return [];
+  }
+}
+
+function shortGid(gid: string) {
+  return gid.replace("gid://shopify/Product/", "#").replace("gid://shopify/Collection/", "#");
+}
 
 /**
  * Process an array of items in batches with concurrency limit.
@@ -680,19 +699,40 @@ async function fetchFilteredProducts(
 ): Promise<string[]> {
   // For SELECTED_PRODUCTS, return the stored product GIDs directly
   if (rule.filterType === "SELECTED_PRODUCTS") {
-    if (rule.filterProductIds) {
-      try {
-        const ids: string[] = JSON.parse(rule.filterProductIds);
-        if (ids.length > 0) {
-          console.log(`[SyncEngine] SELECTED_PRODUCTS: ${ids.length} products selected`);
-          return ids;
-        }
-      } catch (e) {
-        console.error(`[SyncEngine] Failed to parse filterProductIds:`, e);
+    const ids = parseGidList(rule.filterProductIds);
+    if (ids.length > 0) {
+      const result: any = await sourceClient.queryWithRetry(
+        `#graphql
+        query ValidateSelectedSourceProducts($ids: [ID!]!) {
+          nodes(ids: $ids) {
+            ... on Product {
+              id
+            }
+          }
+        }`,
+        { ids }
+      );
+
+      if (result.errors?.length) {
+        throw new Error(
+          `Could not validate selected source products: ${result.errors
+            .map((error: { message: string }) => error.message)
+            .join("; ")}`
+        );
       }
+
+      const found = new Set((result.data?.nodes || []).filter(Boolean).map((node: { id: string }) => node.id));
+      const missing = ids.filter((id) => !found.has(id));
+      if (missing.length > 0) {
+        throw new Error(`${MISSING_SOURCE_PRODUCT_MESSAGE} Missing: ${missing.map(shortGid).join(", ")}`);
+      }
+
+      console.log(`[SyncEngine] SELECTED_PRODUCTS: ${ids.length} products selected`);
+      return ids;
     }
-    // Fallback: no products selected yet, sync ALL products from source
-    console.log(`[SyncEngine] SELECTED_PRODUCTS filter but no filterProductIds set, falling back to ALL products`);
+
+    console.log(`[SyncEngine] SELECTED_PRODUCTS filter has no products selected`);
+    return [];
   }
 
   // For SELECTED_COLLECTIONS, fetch products from those collections
@@ -705,6 +745,38 @@ async function fetchFilteredProducts(
     }
 
     if (collectionIds.length > 0) {
+      const validationResult: any = await sourceClient.queryWithRetry(
+        `#graphql
+        query ValidateSelectedSourceCollections($ids: [ID!]!) {
+          nodes(ids: $ids) {
+            ... on Collection {
+              id
+            }
+          }
+        }`,
+        { ids: collectionIds }
+      );
+
+      if (validationResult.errors?.length) {
+        throw new Error(
+          `Could not validate selected source collections: ${validationResult.errors
+            .map((error: { message: string }) => error.message)
+            .join("; ")}`
+        );
+      }
+
+      const foundCollections = new Set(
+        (validationResult.data?.nodes || []).filter(Boolean).map((node: { id: string }) => node.id)
+      );
+      const missingCollections = collectionIds.filter((id) => !foundCollections.has(id));
+      if (missingCollections.length > 0) {
+        throw new Error(
+          `Selected collection is missing from source store. Re-select it from the source store. Missing: ${missingCollections
+            .map(shortGid)
+            .join(", ")}`
+        );
+      }
+
       const productGids: string[] = [];
       const seen = new Set<string>();
       const addProductGid = (gid: string) => {

@@ -25,6 +25,7 @@ import { TitleBar } from "@shopify/app-bridge-react";
 import { authenticate } from "../shopify.server";
 import prisma from "../db.server";
 import { triggerManualSync } from "../services/sync-engine.server";
+import { createClientForStore } from "../services/shopify-client.server";
 import { setupScheduledSync, removeScheduledSync } from "../jobs/queue.server";
 import { withDbRetry } from "../utils/db-retry.server";
 import { getAccountShop } from "../services/store-management.server";
@@ -61,6 +62,127 @@ function normalizeSyncErrors(errors: unknown): SyncRunError[] {
 
 function productLabel(sourceGid?: string) {
   return sourceGid ? sourceGid.replace("gid://shopify/Product/", "#") : "Product";
+}
+
+function parseGidList(value?: string | null): string[] {
+  if (!value) return [];
+  try {
+    const parsed = JSON.parse(value);
+    return Array.isArray(parsed)
+      ? parsed.filter((id): id is string => typeof id === "string" && id.length > 0)
+      : [];
+  } catch {
+    return [];
+  }
+}
+
+function shortProductId(gid: string) {
+  return gid.replace("gid://shopify/Product/", "#");
+}
+
+async function validateSelectedSourceProducts(
+  sourceStoreId: string,
+  filterType: string,
+  filterProductIds?: string | null
+) {
+  if (filterType !== "SELECTED_PRODUCTS") return;
+
+  const ids = parseGidList(filterProductIds);
+  if (ids.length === 0) {
+    throw new Error("Select at least one source product, or change filter type to All products.");
+  }
+
+  const client = await createClientForStore(sourceStoreId);
+  const result = await client.queryWithRetry<{
+    nodes: Array<{ id: string; title?: string } | null>;
+  }>(
+    `#graphql
+    query ValidateSelectedSourceProducts($ids: [ID!]!) {
+      nodes(ids: $ids) {
+        ... on Product {
+          id
+          title
+        }
+      }
+    }`,
+    { ids }
+  );
+
+  if (result.errors?.length) {
+    throw new Error(
+      `Could not validate selected source products: ${result.errors
+        .map((error) => error.message)
+        .join("; ")}`
+    );
+  }
+
+  const found = new Set((result.data?.nodes || []).filter(Boolean).map((node) => node!.id));
+  const missing = ids.filter((id) => !found.has(id));
+  if (missing.length > 0) {
+    throw new Error(
+      `Selected product is missing from source store: ${missing
+        .map(shortProductId)
+        .join(", ")}. Re-select it from the source store.`
+    );
+  }
+}
+
+async function validatePriceRuleForAccount(priceRuleId: string | null, ownerShop: string) {
+  if (!priceRuleId) return;
+  const priceRule = await prisma.priceRule.findFirst({
+    where: { id: priceRuleId, ownerShop },
+    select: { id: true },
+  });
+  if (!priceRule) {
+    throw new Error("Selected price rule was not found for this account.");
+  }
+}
+
+async function validateSelectedSourceCollections(
+  sourceStoreId: string,
+  filterType: string,
+  filterCollectionIds?: string | null
+) {
+  if (filterType !== "SELECTED_COLLECTIONS") return;
+
+  const ids = parseGidList(filterCollectionIds);
+  if (ids.length === 0) {
+    throw new Error("Select at least one source collection, or change filter type to All products.");
+  }
+
+  const client = await createClientForStore(sourceStoreId);
+  const result = await client.queryWithRetry<{
+    nodes: Array<{ id: string; title?: string } | null>;
+  }>(
+    `#graphql
+    query ValidateSelectedSourceCollections($ids: [ID!]!) {
+      nodes(ids: $ids) {
+        ... on Collection {
+          id
+          title
+        }
+      }
+    }`,
+    { ids }
+  );
+
+  if (result.errors?.length) {
+    throw new Error(
+      `Could not validate selected source collections: ${result.errors
+        .map((error) => error.message)
+        .join("; ")}`
+    );
+  }
+
+  const found = new Set((result.data?.nodes || []).filter(Boolean).map((node) => node!.id));
+  const missing = ids.filter((id) => !found.has(id));
+  if (missing.length > 0) {
+    throw new Error(
+      `Selected collection is missing from source store: ${missing
+        .map((id) => id.replace("gid://shopify/Collection/", "#"))
+        .join(", ")}. Re-select it from the source store.`
+    );
+  }
 }
 
 const DEFAULT_FORM = {
@@ -137,6 +259,7 @@ export const loader = async ({ request }: LoaderFunctionArgs) => {
       })),
       stores,
       priceRules,
+      currentShop: session.shop,
       loadError: null as string | null,
     });
   } catch (e) {
@@ -145,6 +268,7 @@ export const loader = async ({ request }: LoaderFunctionArgs) => {
       syncRules: [],
       stores: [],
       priceRules: [],
+      currentShop: session.shop,
       loadError:
         "Couldn't load sync rules right now (temporary connection issue). Please reload.",
     });
@@ -170,6 +294,7 @@ export const action = async ({ request }: ActionFunctionArgs) => {
 
   const formData = await request.formData();
   const intent = formData.get("intent") as string;
+  const ownerShop = await getAccountShop(session.shop);
 
   const parseRuleData = (fd: FormData) => ({
     name: fd.get("name") as string,
@@ -200,7 +325,25 @@ export const action = async ({ request }: ActionFunctionArgs) => {
         return json({ error: "Name, source store, and destination store are required" }, { status: 400 });
       }
 
-      const ownerShop = await getAccountShop(session.shop);
+      const storeCount = await prisma.connectedStore.count({
+        where: {
+          id: { in: [data.sourceStoreId, data.destStoreId] },
+          ownerShop,
+          status: "ACTIVE",
+        },
+      });
+      if (storeCount !== 2) {
+        return json({ error: "Source and destination stores must belong to this account." }, { status: 400 });
+      }
+
+      try {
+        await validatePriceRuleForAccount(data.priceRuleId, ownerShop);
+        await validateSelectedSourceProducts(data.sourceStoreId, data.filterType, data.filterProductIds);
+        await validateSelectedSourceCollections(data.sourceStoreId, data.filterType, data.filterCollectionIds);
+      } catch (error) {
+        return json({ error: (error as Error).message }, { status: 400 });
+      }
+
       const newRule = await prisma.syncRule.create({ data: { ...data, ownerShop } });
 
       if (
@@ -221,11 +364,31 @@ export const action = async ({ request }: ActionFunctionArgs) => {
       }
 
       try {
+        const existingRule = await prisma.syncRule.findFirst({
+          where: { id: ruleId, ownerShop },
+          select: { id: true, sourceStoreId: true },
+        });
+        if (!existingRule) {
+          return json({ error: "Sync rule not found for this account." }, { status: 404 });
+        }
+
         // Remove source/dest store IDs from update (can't change stores)
         const { sourceStoreId, destStoreId, ...updateData } = data;
 
+        await validatePriceRuleForAccount(updateData.priceRuleId, ownerShop);
+        await validateSelectedSourceProducts(
+          existingRule.sourceStoreId,
+          updateData.filterType,
+          updateData.filterProductIds
+        );
+        await validateSelectedSourceCollections(
+          existingRule.sourceStoreId,
+          updateData.filterType,
+          updateData.filterCollectionIds
+        );
+
         await prisma.syncRule.update({
-          where: { id: ruleId },
+          where: { id: existingRule.id },
           data: updateData,
         });
 
@@ -248,17 +411,27 @@ export const action = async ({ request }: ActionFunctionArgs) => {
     case "toggle": {
       const ruleId = formData.get("ruleId") as string;
       const isActive = formData.get("isActive") === "true";
-      await prisma.syncRule.update({
-        where: { id: ruleId },
+      const result = await prisma.syncRule.updateMany({
+        where: { id: ruleId, ownerShop },
         data: { isActive },
       });
+      if (result.count === 0) {
+        return json({ error: "Sync rule not found for this account." }, { status: 404 });
+      }
       return json({ success: true });
     }
 
     case "delete": {
       const ruleId = formData.get("ruleId") as string;
+      const existingRule = await prisma.syncRule.findFirst({
+        where: { id: ruleId, ownerShop },
+        select: { id: true },
+      });
+      if (!existingRule) {
+        return json({ error: "Sync rule not found for this account." }, { status: 404 });
+      }
       await removeScheduledSync(ruleId);
-      await prisma.syncRule.delete({ where: { id: ruleId } });
+      await prisma.syncRule.delete({ where: { id: existingRule.id } });
       return json({ success: true });
     }
 
@@ -266,10 +439,13 @@ export const action = async ({ request }: ActionFunctionArgs) => {
       const ruleId = formData.get("ruleId") as string;
       try {
         // Log token state for debugging
-        const rule = await prisma.syncRule.findUnique({
-          where: { id: ruleId },
+        const rule = await prisma.syncRule.findFirst({
+          where: { id: ruleId, ownerShop },
           include: { sourceStore: true, destStore: true },
         });
+        if (!rule) {
+          return json({ error: "Sync rule not found for this account." }, { status: 404 });
+        }
         if (rule) {
           const srcSession = await prisma.session.findFirst({
             where: { shop: rule.sourceStore.shopDomain, isOnline: false },
@@ -303,7 +479,7 @@ export const action = async ({ request }: ActionFunctionArgs) => {
 };
 
 export default function SyncRulesPage() {
-  const { syncRules, stores, priceRules, loadError } = useLoaderData<typeof loader>();
+  const { syncRules, stores, priceRules, currentShop, loadError } = useLoaderData<typeof loader>();
   const submit = useSubmit();
   const fetcher = useFetcher<{
     error?: string;
@@ -320,6 +496,9 @@ export default function SyncRulesPage() {
 
   const baseStores = stores.filter((s: any) => s.isBaseStore);
   const destStores = stores.filter((s: any) => !s.isBaseStore);
+  const selectedSourceStore = stores.find((s: any) => s.id === formData.sourceStoreId);
+  const canPickFromCurrentShop =
+    !selectedSourceStore || selectedSourceStore.shopDomain === currentShop;
 
   const openCreateModal = () => {
     setFormData(DEFAULT_FORM);
@@ -768,7 +947,14 @@ export default function SyncRulesPage() {
                       })),
                     ]}
                     value={formData.sourceStoreId}
-                    onChange={(v) => setFormData({ ...formData, sourceStoreId: v })}
+                    onChange={(v) =>
+                      setFormData({
+                        ...formData,
+                        sourceStoreId: v,
+                        filterProductIds: [],
+                        filterCollectionIds: [],
+                      })
+                    }
                   />
                 </Box>
                 <Box minWidth="200px">
@@ -842,7 +1028,12 @@ export default function SyncRulesPage() {
 
             {formData.filterType === "SELECTED_COLLECTIONS" && (
               <BlockStack gap="300">
-                <Button onClick={openCollectionPicker}>
+                {!canPickFromCurrentShop && (
+                  <Banner tone="warning">
+                    Open this app from the source store admin to select source collections.
+                  </Banner>
+                )}
+                <Button onClick={openCollectionPicker} disabled={!canPickFromCurrentShop || !formData.sourceStoreId}>
                   {formData.filterCollectionIds.length > 0 ? "Change collections" : "Select collections"}
                 </Button>
                 {formData.filterCollectionIds.length > 0 && (
@@ -864,7 +1055,12 @@ export default function SyncRulesPage() {
 
             {formData.filterType === "SELECTED_PRODUCTS" && (
               <BlockStack gap="300">
-                <Button onClick={openProductPicker}>
+                {!canPickFromCurrentShop && (
+                  <Banner tone="warning">
+                    Open this app from the source store admin to select source products.
+                  </Banner>
+                )}
+                <Button onClick={openProductPicker} disabled={!canPickFromCurrentShop || !formData.sourceStoreId}>
                   {formData.filterProductIds.length > 0 ? "Change products" : "Select products"}
                 </Button>
                 {formData.filterProductIds.length > 0 && (

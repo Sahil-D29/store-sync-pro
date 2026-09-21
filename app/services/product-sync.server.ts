@@ -21,6 +21,19 @@ interface SyncProductResult {
   duration: number;
 }
 
+const MISSING_SOURCE_PRODUCT_ERROR =
+  "Selected product is missing from source store. Re-select it from the source store.";
+
+function isProductDoesNotExistError(error: any) {
+  const code = String(error?.code || "");
+  const message = String(error?.message || "").toLowerCase();
+  return (
+    code === "PRODUCT_DOES_NOT_EXIST" ||
+    (message.includes("product") &&
+      (message.includes("does not exist") || message.includes("not found")))
+  );
+}
+
 /**
  * The subset of a SyncRule's configuration actually read by the sync engine
  * (product-sync/product-extras/inventory-sync/collection-sync). Deliberately
@@ -74,7 +87,7 @@ export async function syncProduct(
         action: "SKIP",
         sourceGid: sourceProductGid,
         error:
-          sourceResult.errors?.[0]?.message || "Product not found on source",
+          sourceResult.errors?.[0]?.message || MISSING_SOURCE_PRODUCT_ERROR,
         duration: Date.now() - startTime,
       };
     }
@@ -142,7 +155,7 @@ export async function syncProduct(
       console.log(`[ProductSync] productSet userErrors:`, JSON.stringify(errors));
 
       // Handle PRODUCT_DOES_NOT_EXIST: stale mapping, clear it and retry as create
-      const notExistError = errors.find((e: any) => e.code === "PRODUCT_DOES_NOT_EXIST");
+      const notExistError = errors.find(isProductDoesNotExistError);
       if (notExistError && existingMapping?.destProductGid) {
         console.log(`[ProductSync] Dest product was deleted, clearing stale mapping and retrying as create`);
         await prisma.productMapping.delete({
