@@ -697,6 +697,16 @@ export async function syncCollection(
             { collection: collectionInput }
           );
 
+      if (updateResult.errors?.length) {
+        return {
+          success: false,
+          action: "UPDATE",
+          sourceGid: sourceCollectionGid,
+          error: updateResult.errors.map((error: { message: string }) => error.message).join("; "),
+          duration: Date.now() - startTime,
+        };
+      }
+
       if (updateResult.data?.collectionUpdate?.collection) {
         console.log(
           `[CollectionSync] Updated destination collection ${destCollectionGid} sortOrder=${updateResult.data.collectionUpdate.collection.sortOrder || "unknown"}`
@@ -955,7 +965,7 @@ async function syncCollectionProducts(
   const desiredSet = new Set(desiredDestIds);
 
   // Current products already in the destination collection.
-  const currentDestIds = await fetchCollectionProductGids(
+  let currentDestIds = await fetchCollectionProductGids(
     destClient,
     destCollectionGid
   );
@@ -992,14 +1002,17 @@ async function syncCollectionProducts(
     await waitForJob(destClient, jobId);
   }
 
+  if (toAdd.length || toRemove.length) {
+    currentDestIds = await fetchCollectionProductGids(destClient, destCollectionGid);
+  }
+
   // Preserve the exact source order. The destination collection is forced to
   // MANUAL for custom collections so this also aligns source collections whose
   // current default order is dynamic, such as BEST_SELLING.
   if (desiredDestIds.length) {
-    const moves = desiredDestIds.map((id, index) => ({
-      id,
-      newPosition: String(index),
-    }));
+    await ensureCollectionManualSort(destClient, destCollectionGid);
+
+    const moves = buildSequentialReorderMoves(currentDestIds, desiredDestIds);
 
     for (let i = 0; i < moves.length; i += 250) {
       const batch = moves.slice(i, i + 250);
@@ -1017,6 +1030,85 @@ async function syncCollectionProducts(
       await waitForJob(destClient, jobId);
     }
   }
+}
+
+function buildSequentialReorderMoves(
+  currentDestIds: string[],
+  desiredDestIds: string[]
+): Array<{ id: string; newPosition: string }> {
+  const working = [...currentDestIds];
+  const moves: Array<{ id: string; newPosition: string }> = [];
+
+  desiredDestIds.forEach((desiredId, desiredIndex) => {
+    const currentIndex = working.indexOf(desiredId);
+    if (currentIndex === -1 || currentIndex === desiredIndex) return;
+
+    moves.push({ id: desiredId, newPosition: String(desiredIndex) });
+    working.splice(currentIndex, 1);
+    working.splice(desiredIndex, 0, desiredId);
+  });
+
+  return moves;
+}
+
+async function ensureCollectionManualSort(
+  destClient: ShopifyGraphQLClient,
+  destCollectionGid: string
+): Promise<void> {
+  for (let attempt = 0; attempt < 5; attempt++) {
+    const queryResult: any = await destClient.queryWithRetry(
+      `#graphql
+      query GetCollectionSortOrder($id: ID!) {
+        collection(id: $id) {
+          id
+          sortOrder
+        }
+      }`,
+      { id: destCollectionGid }
+    );
+
+    if (queryResult.errors?.length) {
+      throw new Error(
+        `Failed to read destination collection sort order: ${queryResult.errors
+          .map((error: { message: string }) => error.message)
+          .join("; ")}`
+      );
+    }
+
+    if (queryResult.data?.collection?.sortOrder === "MANUAL") return;
+
+    const updateResult: any = await destClient.queryWithRetry(
+      COLLECTION_UPDATE_DETAILS_MUTATION,
+      {
+        collection: {
+          id: destCollectionGid,
+          sortOrder: "MANUAL",
+        },
+      }
+    );
+
+    if (updateResult.errors?.length) {
+      throw new Error(
+        `Failed to set destination collection to manual sort: ${updateResult.errors
+          .map((error: { message: string }) => error.message)
+          .join("; ")}`
+      );
+    }
+
+    if (updateResult.data?.collectionUpdate?.userErrors?.length) {
+      throw new Error(
+        `Failed to set destination collection to manual sort: ${updateResult.data.collectionUpdate.userErrors
+          .map((error: { message: string }) => error.message)
+          .join("; ")}`
+      );
+    }
+
+    await new Promise((resolve) => setTimeout(resolve, 500 * (attempt + 1)));
+  }
+
+  throw new Error(
+    "Destination collection is still not manually sorted, so Shopify will not allow product reordering."
+  );
 }
 
 interface LinkExistingProductResult {
