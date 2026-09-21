@@ -28,6 +28,7 @@ export default function App() {
         </Link>
         <Link to="/app/stores">Stores</Link>
         <Link to="/app/sync-rules">Sync Rules</Link>
+        <Link to="/app/inventory-sync">Inventory Sync</Link>
         <Link to="/app/price-rules">Price Rules</Link>
         <Link to="/app/collection-mapping">Collections</Link>
         <Link to="/app/bulk-sync">Bulk Sync</Link>

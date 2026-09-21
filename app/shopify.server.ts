@@ -8,9 +8,11 @@ import { PrismaSessionStorage } from "@shopify/shopify-app-session-storage-prism
 import prisma from "./db.server";
 import { ensureStoreRegistered } from "./services/store-management.server";
 import { startRealtimeCollectionPolling } from "./services/realtime-collection-poller.server";
+import { startInventoryRulePolling } from "./services/inventory-rule-sync.server";
 import { withDbRetry } from "./utils/db-retry.server";
 
 startRealtimeCollectionPolling();
+startInventoryRulePolling();
 
 const shopify = shopifyApp({
   apiKey: process.env.SHOPIFY_API_KEY,

@@ -1,6 +1,7 @@
 import type { ActionFunctionArgs } from "@remix-run/node";
 import { authenticate } from "../shopify.server";
 import { handleInventoryWebhook } from "../services/sync-engine.server";
+import { handleInventoryOnlyWebhook } from "../services/inventory-rule-sync.server";
 import { isWebhookDuplicate, getWebhookId } from "../utils/webhook-dedup.server";
 
 export const action = async ({ request }: ActionFunctionArgs) => {
@@ -25,6 +26,7 @@ export const action = async ({ request }: ActionFunctionArgs) => {
 
     if (inventoryItemId && locationId) {
       await handleInventoryWebhook(shop, inventoryItemId, locationId, available);
+      await handleInventoryOnlyWebhook(shop, inventoryItemId, available);
     }
   } catch (error) {
     console.error(`[Webhook] Error processing ${topic}:`, error);

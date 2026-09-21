@@ -59,6 +59,8 @@ model ConnectedStore {
   productMappingsAsDest      ProductMapping[]    @relation("DestStoreMapping")
   collectionMappingsAsSource CollectionMapping[] @relation("SourceCollectionStore")
   collectionMappingsAsDest   CollectionMapping[] @relation("DestCollectionStore")
+  inventorySyncRulesAsSource  InventorySyncRule[] @relation("InventorySourceStore")
+  inventorySyncRulesAsDest    InventorySyncRule[] @relation("InventoryDestStore")
 }
 
 enum AuthMethod {
@@ -269,6 +271,33 @@ enum MissingProductAction {
 enum CollectionSyncTrigger {
   REALTIME
   MANUAL
+}
+
+// ===== INVENTORY SYNC RULES =====
+
+model InventorySyncRule {
+  id            String @id @default(cuid())
+  ownerShop     String?
+  sourceStoreId String
+  sourceStore   ConnectedStore @relation("InventorySourceStore", fields: [sourceStoreId], references: [id], onDelete: Cascade)
+  destStoreId   String
+  destStore     ConnectedStore @relation("InventoryDestStore", fields: [destStoreId], references: [id], onDelete: Cascade)
+
+  direction InventorySyncDirection @default(TWO_WAY)
+  isActive  Boolean                @default(true)
+  lastRunAt DateTime?
+  lastError String?
+  createdAt DateTime               @default(now())
+  updatedAt DateTime               @updatedAt
+
+  @@unique([sourceStoreId, destStoreId])
+  @@index([ownerShop])
+  @@index([isActive])
+}
+
+enum InventorySyncDirection {
+  ONE_WAY
+  TWO_WAY
 }
 
 // ===== SYNC LOGS =====

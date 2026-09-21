@@ -381,7 +381,7 @@ async function setInventoryLevelViaRest(
   }
 }
 
-async function setDestinationInventoryQuantity(
+export async function setDestinationInventoryQuantity(
   destClient: ShopifyGraphQLClient,
   destVariantGid: string,
   quantity: number
