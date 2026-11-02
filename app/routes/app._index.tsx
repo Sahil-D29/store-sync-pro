@@ -53,6 +53,7 @@ export const loader = async ({ request }: LoaderFunctionArgs) => {
       successCount,
       errorCount,
       catalogRules,
+      catalogStores,
     ] = await withDbRetry(() =>
       Promise.all([
         prisma.connectedStore.count({ where: { ownerShop, status: { not: "DISCONNECTED" } } }),
@@ -67,11 +68,13 @@ export const loader = async ({ request }: LoaderFunctionArgs) => {
         prisma.syncLog.count({ where: { syncRule: { ownerShop }, status: "SUCCESS", createdAt: { gte: dayAgo } } }),
         prisma.syncLog.count({ where: { syncRule: { ownerShop }, status: "FAILED", createdAt: { gte: dayAgo } } }),
         prisma.syncRule.findMany({ where: { ownerShop, isActive: true, syncProducts: true, sourceStore: { status: "ACTIVE" }, destStore: { status: "ACTIVE" } }, select: { id: true, name: true, sourceStore: { select: { shopDomain: true, shopName: true } }, destStore: { select: { shopDomain: true, shopName: true } } }, orderBy: { createdAt: "asc" } }),
+        prisma.connectedStore.findMany({ where: { ownerShop, status: { not: "DISCONNECTED" } }, select: { id: true, shopDomain: true, shopName: true, isBaseStore: true }, orderBy: [{ isBaseStore: "desc" }, { createdAt: "asc" }] }),
       ])
     );
 
     return {
       catalogRules,
+      catalogStores,
       stats: {
         connectedStores,
         activeSyncRules,
@@ -97,6 +100,7 @@ export const loader = async ({ request }: LoaderFunctionArgs) => {
   } catch (e) {
     console.error("[Dashboard] Loader DB error:", (e as Error).message);
     return {
+      catalogStores: [] as Array<{ id: string; shopDomain: string; shopName: string | null; isBaseStore: boolean }>,
       catalogRules: [] as Array<{ id: string; name: string; sourceStore: { shopDomain: string; shopName: string | null }; destStore: { shopDomain: string; shopName: string | null } }>,
       stats: EMPTY_STATS,
       recentLogs: [] as Array<{
@@ -117,7 +121,7 @@ export const loader = async ({ request }: LoaderFunctionArgs) => {
 };
 
 export default function Dashboard() {
-  const { stats, recentLogs, loadError, catalogRules } = useLoaderData<typeof loader>();
+  const { stats, recentLogs, loadError, catalogRules, catalogStores } = useLoaderData<typeof loader>();
 
   const usagePercent =
     stats.productLimit > 0 && stats.productLimit < 999999999
@@ -208,7 +212,7 @@ export default function Dashboard() {
           </Card>
         </InlineGrid>
 
-        <CatalogOverview rules={catalogRules} />
+        <CatalogOverview rules={catalogRules} stores={catalogStores} />
         <FeatureShortcuts />
         <Layout>
           <Layout.Section>

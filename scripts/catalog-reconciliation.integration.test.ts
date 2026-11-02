@@ -36,6 +36,7 @@ test(
       .slice(0, 3)
       .map((p, i) => ({ ...p, id: `gid://shopify/Product/${101 + i}` }));
     let destinationUnavailable = false;
+    let boundedCounts = false;
     let catalogGate: Promise<void> | null = null;
     let releaseCatalog: (() => void) | undefined;
     let mutations = 0;
@@ -70,7 +71,11 @@ test(
           JSON.stringify({ errors: [{ message: "Destination unavailable" }] }),
           { status: 200 },
         );
-      if (query.includes("DashboardCatalog")) {
+      if (query.includes("DashboardStoreCounts")) {
+        data = Object.fromEntries(["total", "active", "draft", "unlisted", "archived"].map(key => [key, { count: key === "total" ? list.length : list.filter(p => p.status === key.toUpperCase()).length, precision: boundedCounts ? "AT_LEAST" : "EXACT" }]));
+      } else if (query.includes("DashboardStoreStatusPage")) {
+        data = { products: page(list.map(p => ({ status: p.status })), variables.after, 20) };
+      } else if (query.includes("DashboardCatalog")) {
         if (isSource && catalogGate) await catalogGate;
         data = {
           products: page(
@@ -230,6 +235,18 @@ test(
       throw new Error("Catalog job timed out");
     };
     try {
+      const { getStoreCatalogCounts } = await import("../app/services/store-catalog.server");
+      await db.syncRule.update({ where: { id: rule.id }, data: { isActive: false } });
+      assert.equal(await db.syncRule.count({ where: { ownerShop: owner, isActive: true } }), 0);
+      const independentSource = await getStoreCatalogCounts(owner, src.id);
+      assert.equal(independentSource.counts.total, 27, "Source count is available without any active rule");
+      assert.equal(independentSource.counts.UNLISTED, 7);
+      assert.equal((await getStoreCatalogCounts(owner, dst.id)).counts.total, 3, "Destination count is available without any active rule");
+      await assert.rejects(getStoreCatalogCounts("another-account.myshopify.com", src.id), /not found/);
+      boundedCounts = true;
+      assert.equal((await getStoreCatalogCounts(owner, src.id)).counts.total, 27, "Bounded counts fall back to a fully paginated exact count");
+      boundedCounts = false;
+      await db.syncRule.update({ where: { id: rule.id }, data: { isActive: true } });
       const { triggerManualSync } = await import("../app/services/sync-engine.server");
       const empty = await triggerManualSync(rule.id, []);
       assert.equal(empty.queued, 0, "An explicit empty selection must not fall back to the whole catalog");

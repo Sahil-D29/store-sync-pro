@@ -36,6 +36,10 @@ type Rule = {
   sourceStore: { shopDomain: string; shopName: string | null };
   destStore: { shopDomain: string; shopName: string | null };
 };
+export type CatalogStore = Rule["sourceStore"] & {
+  id: string;
+  isBaseStore: boolean;
+};
 type CatalogData = {
   error?: string;
   ruleId: string;
@@ -91,12 +95,16 @@ function StoreCard({
   counts,
   error,
   refreshedAt,
+  loading = false,
+  onRefresh,
 }: {
   title: string;
   store: Rule["sourceStore"];
   counts?: CatalogCounts | null;
   error?: string | null;
   refreshedAt?: string;
+  loading?: boolean;
+  onRefresh?: () => void;
 }) {
   return (
     <Card>
@@ -107,6 +115,18 @@ function StoreCard({
             {counts ? "Exact count" : "Awaiting catalog"}
           </Text>
         </InlineStack>
+        {onRefresh && (
+          <InlineStack gap="200" blockAlign="center">
+            <Button onClick={onRefresh} loading={loading} disabled={loading}>
+              Refresh counts
+            </Button>
+            {loading && (
+              <Text as="span" tone="subdued">
+                Loading product counts…
+              </Text>
+            )}
+          </InlineStack>
+        )}
         <BlockStack gap="100">
           <Text as="h3" variant="headingMd">
             {storeName(store)}
@@ -148,7 +168,105 @@ function StoreCard({
     </Card>
   );
 }
-export function CatalogOverview({ rules }: { rules: Rule[] }) {
+function ConnectedStoreCountCard({
+  store,
+  refreshKey,
+  title,
+}: {
+  store: CatalogStore;
+  refreshKey: number;
+  title?: string;
+}) {
+  const fetcher = useFetcher<{
+    storeId: string;
+    counts?: CatalogCounts;
+    refreshedAt?: string;
+    error?: string;
+  }>();
+  const refresh = () =>
+    fetcher.load(`/api/store-counts/${encodeURIComponent(store.id)}`);
+  useEffect(() => {
+    refresh();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [store.id, refreshKey]);
+  const data = fetcher.data?.storeId === store.id ? fetcher.data : undefined;
+  return (
+    <StoreCard
+      title={title || (store.isBaseStore ? "Source" : "Destination")}
+      store={store}
+      counts={data?.counts}
+      error={data?.error}
+      refreshedAt={data?.refreshedAt}
+      loading={fetcher.state !== "idle"}
+      onRefresh={refresh}
+    />
+  );
+}
+export function ConnectedCatalogOverview({
+  stores,
+}: {
+  stores: CatalogStore[];
+}) {
+  const [refreshKey, setRefreshKey] = useState(0);
+  return (
+    <BlockStack gap="400">
+      <InlineStack align="space-between" gap="300" blockAlign="center">
+        <BlockStack gap="100">
+          <Text as="h2" variant="headingLg">
+            Your product overview
+          </Text>
+          <Text as="p" tone="subdued">
+            Product totals for your connected stores, independent of sync rules.
+          </Text>
+        </BlockStack>
+        {stores.length > 0 && (
+          <Button onClick={() => setRefreshKey((value) => value + 1)}>
+            Refresh all counts
+          </Button>
+        )}
+      </InlineStack>
+      {stores.length > 0 && (
+        <InlineGrid columns={{ xs: 1, md: 2 }} gap="400">
+          {stores.map((store) => (
+            <ConnectedStoreCountCard
+              key={store.id}
+              store={store}
+              refreshKey={refreshKey}
+            />
+          ))}
+        </InlineGrid>
+      )}
+      <Card>
+        <BlockStack gap="300">
+          <Text as="p" tone="subdued">
+            {stores.length
+              ? "Create an active product sync rule to match existing products and choose the remaining products to sync."
+              : "Connect your source and destination stores to see product totals and status breakdowns."}
+          </Text>
+          <InlineStack gap="200">
+            <Button
+              variant="primary"
+              url={stores.length ? "/app/sync-rules" : "/app/stores"}
+            >
+              {stores.length ? "Create sync rule" : "Connect stores"}
+            </Button>
+            {stores.length > 0 && (
+              <Button url="/app/stores">Manage stores</Button>
+            )}
+          </InlineStack>
+        </BlockStack>
+      </Card>
+    </BlockStack>
+  );
+}
+export function CatalogOverview({
+  rules,
+  stores = [],
+}: {
+  rules: Rule[];
+  stores?: CatalogStore[];
+}) {
+  const [storeRefreshKey, setStoreRefreshKey] = useState(0);
   const [ruleId, setRuleId] = useState(rules[0]?.id || "");
   const [open, setOpen] = useState(false);
   const [selection, setSelection] = useState<CatalogSelection>({
@@ -171,6 +289,12 @@ export function CatalogOverview({ rules }: { rules: Rule[] }) {
   const job = data?.job;
   const snapshot = data?.snapshot;
   const rule = rules.find((r) => r.id === ruleId);
+  const sourceStore = stores.find(
+    (store) => store.shopDomain === rule?.sourceStore.shopDomain,
+  );
+  const destinationStore = stores.find(
+    (store) => store.shopDomain === rule?.destStore.shopDomain,
+  );
   const running = job?.status === "RUNNING" || operation.state !== "idle";
   const available = !!snapshot && !snapshot.sourceError && !snapshot.destError;
   const requestKey = JSON.stringify({
@@ -269,26 +393,7 @@ export function CatalogOverview({ rules }: { rules: Rule[] }) {
   const close = () => setOpen(false);
 
   if (!rules.length || !rule)
-    return (
-      <Card>
-        <BlockStack gap="300">
-          <Text as="h2" variant="headingLg">
-            Your product overview
-          </Text>
-          <Text as="p" tone="subdued">
-            Create an active product sync rule to compare your source and
-            destination catalogs, match existing products, and choose the
-            remaining products to sync.
-          </Text>
-          <InlineStack gap="200">
-            <Button variant="primary" url="/app/sync-rules">
-              Create sync rule
-            </Button>
-            <Button url="/app/stores">Manage stores</Button>
-          </InlineStack>
-        </BlockStack>
-      </Card>
-    );
+    return <ConnectedCatalogOverview stores={stores} />;
   return (
     <BlockStack gap="400">
       <InlineStack align="space-between" blockAlign="center" gap="300">
@@ -301,7 +406,10 @@ export function CatalogOverview({ rules }: { rules: Rule[] }) {
           </Text>
         </BlockStack>
         <Button
-          onClick={() => start("COMPARE")}
+          onClick={() => {
+            setStoreRefreshKey((value) => value + 1);
+            start("COMPARE");
+          }}
           disabled={running}
           loading={running && job?.operation === "COMPARE"}
         >
@@ -333,20 +441,38 @@ export function CatalogOverview({ rules }: { rules: Rule[] }) {
         </Banner>
       )}
       <InlineGrid columns={{ xs: 1, md: 2 }} gap="400">
-        <StoreCard
-          title="Source"
-          store={rule.sourceStore}
-          counts={snapshot?.sourceCounts}
-          error={snapshot?.sourceError}
-          refreshedAt={snapshot?.refreshedAt}
-        />
-        <StoreCard
-          title="Destination"
-          store={rule.destStore}
-          counts={snapshot?.destCounts}
-          error={snapshot?.destError}
-          refreshedAt={snapshot?.refreshedAt}
-        />
+        {sourceStore ? (
+          <ConnectedStoreCountCard
+            key={sourceStore.id}
+            store={sourceStore}
+            title="Source"
+            refreshKey={storeRefreshKey}
+          />
+        ) : (
+          <StoreCard
+            title="Source"
+            store={rule.sourceStore}
+            counts={snapshot?.sourceCounts}
+            error={snapshot?.sourceError}
+            refreshedAt={snapshot?.refreshedAt}
+          />
+        )}
+        {destinationStore ? (
+          <ConnectedStoreCountCard
+            key={destinationStore.id}
+            store={destinationStore}
+            title="Destination"
+            refreshKey={storeRefreshKey}
+          />
+        ) : (
+          <StoreCard
+            title="Destination"
+            store={rule.destStore}
+            counts={snapshot?.destCounts}
+            error={snapshot?.destError}
+            refreshedAt={snapshot?.refreshedAt}
+          />
+        )}
       </InlineGrid>
       <Card>
         <BlockStack gap="400">

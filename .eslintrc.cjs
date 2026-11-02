@@ -13,7 +13,7 @@ module.exports = {
   overrides: [
     {
       // These integration checks use node:test, not Jest.
-      files: ["scripts/catalog-*.test.ts"],
+      files: ["scripts/catalog-*.test.{ts,tsx}"],
       rules: {
         "jest/no-deprecated-functions": "off",
         "jest/expect-expect": "off",

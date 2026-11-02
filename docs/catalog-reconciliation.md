@@ -1,6 +1,11 @@
 # Dashboard catalog reconciliation
 
-The homepage compares catalogs through an active product sync rule. Whole-store
+The homepage shows connected-store product counts even when no sync rule exists.
+`GET /api/store-counts/:storeId` reads account-scoped Shopify counts independently
+for each store; errors in one store do not hide the other store's totals. The
+unlimited count query falls back to pagination if Shopify returns bounded counts.
+Matching and remaining-product selection require an active product sync rule.
+Whole-store
 counts include Active, Draft, Unlisted and Archived products. The reconciliation
 counts apply the saved rule's eligibility filters. Counts come from fully
 paginated catalog reads, rather than subtracting store totals.
