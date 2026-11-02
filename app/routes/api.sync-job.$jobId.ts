@@ -2,19 +2,24 @@ import type { LoaderFunctionArgs } from "@remix-run/node";
 import { json } from "@remix-run/node";
 import { authenticate } from "../shopify.server";
 import { getSyncJobStatus } from "../services/sync-engine.server";
+import prisma from "../db.server";
+import { getAccountShop } from "../services/store-management.server";
 
 /**
  * GET /api/sync-job/:jobId
  * Poll for background sync job progress.
  */
 export async function loader({ request, params }: LoaderFunctionArgs) {
-  await authenticate.admin(request);
+  const { session } = await authenticate.admin(request);
+  const ownerShop = await getAccountShop(session.shop);
 
   const { jobId } = params;
   if (!jobId) return json({ error: "Missing jobId" }, { status: 400 });
 
   const job = await getSyncJobStatus(jobId);
   if (!job) return json({ error: "Job not found" }, { status: 404 });
+  const rule = await prisma.syncRule.findFirst({ where: { id: job.syncRuleId, ownerShop }, select: { id: true } });
+  if (!rule) return json({ error: "Job not found" }, { status: 404 });
 
   let errors: unknown[] = [];
   if (job.errors) {

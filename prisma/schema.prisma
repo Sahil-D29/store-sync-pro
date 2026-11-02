@@ -213,9 +213,31 @@ model ProductMapping {
 
 enum MappingStatus {
   PENDING
+  MATCHED
   SYNCED
   ERROR
   SKIPPED
+}
+
+// Dashboard catalog scans and actions. activePair is a cross-process lock;
+// completed jobs retain their snapshot, while releasing the unique pair key.
+model CatalogJob {
+  id          String @id @default(cuid())
+  ownerShop   String
+  syncRuleId  String
+  operation   String
+  status      String @default("RUNNING")
+  activePair  String? @unique
+  processed   Int @default(0)
+  total       Int @default(0)
+  result      Json?
+  snapshot    Json?
+  error       String?
+  startedAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+  completedAt DateTime?
+
+  @@index([ownerShop, syncRuleId, startedAt])
 }
 
 // ===== COLLECTION MAPPING =====

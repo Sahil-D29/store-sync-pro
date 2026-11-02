@@ -520,7 +520,7 @@ export async function triggerManualSync(
 
   // Resolve product list before going async
   let allProductGids: string[];
-  if (productGids?.length) {
+  if (productGids !== undefined) {
     allProductGids = productGids;
   } else {
     allProductGids = await fetchFilteredProducts(rule, sourceClient);
@@ -529,12 +529,14 @@ export async function triggerManualSync(
   console.log(`[SyncEngine] Total products to sync: ${allProductGids.length}`);
 
   // Create a SyncJob to track progress
-  const job = await prisma.syncJob.create({
-    data: {
-      syncRuleId: rule.id,
-      totalProducts: allProductGids.length,
-      trigger: "MANUAL",
-    },
+  const job = await prisma.$transaction(async tx => {
+    const pair = `${rule.sourceStoreId}:${rule.destStoreId}`;
+    await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtext(${pair}))`;
+    await tx.catalogJob.updateMany({ where: { activePair: pair, status: "RUNNING", updatedAt: { lt: new Date(Date.now() - 5 * 60_000) } }, data: { status: "FAILED", error: "Job interrupted. Refresh and retry.", activePair: null, completedAt: new Date() } });
+    if (await tx.catalogJob.findUnique({ where: { activePair: pair } })) throw new Error("A catalog operation is already running for these stores");
+    const ruleIds = (await tx.syncRule.findMany({ where: { sourceStoreId: rule.sourceStoreId, destStoreId: rule.destStoreId }, select: { id: true } })).map(r => r.id);
+    if (await tx.syncJob.findFirst({ where: { syncRuleId: { in: ruleIds }, status: "RUNNING" } })) throw new Error("A product sync is already running for these stores");
+    return tx.syncJob.create({ data: { syncRuleId: rule.id, totalProducts: allProductGids.length, trigger: "MANUAL" } });
   });
 
   // If no products, mark job complete immediately

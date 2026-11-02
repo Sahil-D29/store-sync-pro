@@ -10,4 +10,14 @@ module.exports = {
   globals: {
     shopify: "readonly"
   },
+  overrides: [
+    {
+      // These integration checks use node:test, not Jest.
+      files: ["scripts/catalog-*.test.ts"],
+      rules: {
+        "jest/no-deprecated-functions": "off",
+        "jest/expect-expect": "off",
+      },
+    },
+  ],
 };
