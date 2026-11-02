@@ -68,6 +68,7 @@ type CatalogData = {
   } | null;
   collections?: Array<{ id: string; title: string }>;
   tags?: string[];
+  priceRules?: Array<{ id: string; name: string }>;
 };
 type Preview = {
   error?: string;
@@ -661,7 +662,20 @@ export function CatalogOverview({
             <Button
               variant="primary"
               disabled={running || !sourceStore || !destinationStore}
-              onClick={() =>
+              onClick={() => {
+                if (available) {
+                  setSelection({
+                    ...DEFAULT_SELECTION,
+                    missingOnly: true,
+                    priceRuleId: null,
+                  });
+                  setSearch("");
+                  setOptionSearch("");
+                  setPage(1);
+                  setBrowse(false);
+                  setOpen(true);
+                  return;
+                }
                 operation.submit(
                   {
                     intent: "PREPARE_MISSING",
@@ -673,10 +687,33 @@ export function CatalogOverview({
                     action: "/api/catalog",
                     encType: "application/json",
                   },
-                )
+                );
+              }}
+            >
+              {available
+                ? `Add missing (${snapshot?.missing ?? 0})`
+                : "Add missing products"}
+            </Button>
+            <Button
+              onClick={() => {
+                setSelection({
+                  ...DEFAULT_SELECTION,
+                  existingOnly: true,
+                  priceRuleId: null,
+                });
+                setSearch("");
+                setOptionSearch("");
+                setPage(1);
+                setBrowse(false);
+                setOpen(true);
+              }}
+              disabled={
+                !available ||
+                running ||
+                snapshot?.eligible === snapshot?.missing
               }
             >
-              Add missing products
+              Update existing products
             </Button>
             <Button
               onClick={() => start("MATCH")}
@@ -684,22 +721,11 @@ export function CatalogOverview({
             >
               Match existing products
             </Button>
-            <Button
-              onClick={() => {
-                setSelection((current) => ({ ...current, missingOnly: false }));
-                setOpen(true);
-              }}
-              disabled={
-                !available || running || snapshot?.eligible === snapshot?.synced
-              }
-            >
-              Sync remaining products
-            </Button>
           </InlineStack>
           <Text as="p" variant="bodySm" tone="subdued">
-            Matching links identical handles without changing products. Sync
-            lets you select statuses, collections, tags, or individual products
-            and applies your rule settings.
+            Add copies only products missing from the destination. Update
+            changes only products already there. Match links existing products
+            without changing them.
           </Text>
           {running && (
             <BlockStack gap="200">
@@ -758,11 +784,11 @@ export function CatalogOverview({
         title={
           selection.missingOnly
             ? "Add products missing from destination"
-            : "Choose remaining products to sync"
+            : "Update existing destination products"
         }
         size="large"
         primaryAction={{
-          content: `${selection.missingOnly ? "Add" : "Sync"} ${currentPreview?.selectedCount ?? 0} selected products`,
+          content: `${selection.missingOnly ? "Add" : "Update"} ${currentPreview?.selectedCount ?? 0} selected products`,
           onAction: () => {
             start("SYNC");
             close();
@@ -777,12 +803,36 @@ export function CatalogOverview({
               <p>
                 {selection.missingOnly
                   ? "Only products missing from the destination will be copied. Existing products will not be updated. "
-                  : ""}
-                Only remaining products allowed by “{rule.name}” can be
-                selected. These filters apply to this run; your saved rule stays
-                unchanged.
+                  : "Only products already present in the destination can be updated. Missing products will not be created. "}
+                Status, collection, tag, and manual filters narrow this list.
+                These settings apply only to this operation.
               </p>
             </Banner>
+            <BlockStack gap="200">
+              <Select
+                label="Price rule for this operation"
+                value={selection.priceRuleId || ""}
+                options={[
+                  { label: "Copy source prices unchanged", value: "" },
+                  ...(data?.priceRules || []).map((price) => ({
+                    label: price.name,
+                    value: price.id,
+                  })),
+                ]}
+                onChange={(priceRuleId) =>
+                  changeSelection({ priceRuleId: priceRuleId || null })
+                }
+                helpText="Applies only to the selected products in this operation. Your saved sync-rule settings will not change."
+              />
+              <InlineStack gap="200">
+                <Button url="/app/price-rules" target="_blank">
+                  Create price rule
+                </Button>
+                <Button onClick={reload} loading={state.state !== "idle"}>
+                  Refresh price rules
+                </Button>
+              </InlineStack>
+            </BlockStack>
             <ChoiceList
               title="Product status"
               allowMultiple
@@ -801,7 +851,12 @@ export function CatalogOverview({
               label="Narrow your selection"
               value={selection.method}
               options={[
-                { label: "All remaining products", value: "ALL" },
+                {
+                  label: selection.missingOnly
+                    ? "All missing products"
+                    : "All existing products",
+                  value: "ALL",
+                },
                 { label: "Selected source collections", value: "COLLECTIONS" },
                 { label: "Source product tags", value: "TAGS" },
                 { label: "Manually select products", value: "MANUAL" },
@@ -897,7 +952,11 @@ export function CatalogOverview({
                     setSearch("");
                   }}
                 >
-                  {browse ? "Preview selected" : "Browse remaining"}
+                  {browse
+                    ? "Preview selected"
+                    : selection.missingOnly
+                      ? "Browse missing"
+                      : "Browse existing"}
                 </Button>
               )}
             </InlineStack>

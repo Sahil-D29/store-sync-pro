@@ -8,6 +8,7 @@ import {
   prepareMissingProducts,
 } from "../services/catalog-reconciliation.server";
 import { parseSelection, selectRemaining } from "../services/catalog-selection";
+import prisma from "../db.server";
 
 export async function loader({ request }: LoaderFunctionArgs) {
   const { session } = await authenticate.admin(request);
@@ -15,6 +16,11 @@ export async function loader({ request }: LoaderFunctionArgs) {
   const ruleId = new URL(request.url).searchParams.get("ruleId") || "";
   try {
     const data = await latestCatalog(ownerShop, ruleId);
+    const priceRules = await prisma.priceRule.findMany({
+      where: { ownerShop },
+      select: { id: true, name: true },
+      orderBy: { name: "asc" },
+    });
     const { products = [], ...summary } = data.snapshot || {};
     const collections = new Map(
       products.flatMap((p) => p.collections).map((c) => [c.id, c]),
@@ -23,6 +29,7 @@ export async function loader({ request }: LoaderFunctionArgs) {
       {
         ...data,
         ruleId,
+        priceRules,
         snapshot: data.snapshot
           ? {
               ...summary,

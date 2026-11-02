@@ -26,6 +26,8 @@ export type CatalogSelection = {
   productIds: string[];
   tagMode: "ANY" | "ALL";
   missingOnly?: boolean;
+  existingOnly?: boolean;
+  priceRuleId?: string | null;
 };
 export const DEFAULT_SELECTION: CatalogSelection = {
   statuses: [...PRODUCT_STATUSES],
@@ -65,7 +67,24 @@ export function parseSelection(value: unknown): CatalogSelection {
     productIds: strings("productIds"),
     tagMode: input.tagMode,
     missingOnly: input.missingOnly === true,
+    existingOnly: input.existingOnly === true,
+    priceRuleId: input.priceRuleId || null,
   } as CatalogSelection;
+  if (
+    input.existingOnly !== undefined &&
+    typeof input.existingOnly !== "boolean"
+  )
+    throw new Error("Invalid existing-product selection");
+  if (selection.missingOnly && selection.existingOnly)
+    throw new Error(
+      "Choose either adding missing products or updating existing products",
+    );
+  if (
+    input.priceRuleId !== undefined &&
+    input.priceRuleId !== null &&
+    (typeof input.priceRuleId !== "string" || input.priceRuleId.length > 200)
+  )
+    throw new Error("Invalid price rule");
   if (input.missingOnly !== undefined && typeof input.missingOnly !== "boolean")
     throw new Error("Invalid missing-product selection");
   if (
@@ -88,7 +107,10 @@ export function selectRemaining(
   const collections = new Set(selection.collectionIds);
   const tags = selection.tags.map((tag) => tag.toLowerCase());
   return products.filter((p) => {
-    if (p.state === "SYNCED" || !statuses.has(p.status)) return false;
+    if (!statuses.has(p.status)) return false;
+    if (selection.existingOnly) {
+      if (p.existsInDestination !== true) return false;
+    } else if (p.state === "SYNCED") return false;
     if (selection.missingOnly && p.existsInDestination !== false) return false;
     switch (selection.method) {
       case "ALL":

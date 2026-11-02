@@ -90,6 +90,39 @@ test("missing-only selection excludes unmapped products whose handles already ex
     "Older snapshots without existence checks cannot copy existing products",
   );
 });
+test("add and update select disjoint sets; update includes previously synced products", () => {
+  const candidates = products.map((p, index) => ({
+    ...p,
+    existsInDestination: ![0, 3].includes(index),
+  }));
+  assert.deepEqual(
+    selectRemaining(candidates, {
+      ...DEFAULT_SELECTION,
+      missingOnly: true,
+    }).map((p) => p.handle),
+    ["active", "archived"],
+  );
+  assert.deepEqual(
+    selectRemaining(candidates, {
+      ...DEFAULT_SELECTION,
+      existingOnly: true,
+    }).map((p) => p.handle),
+    ["draft", "unlisted", "synced"],
+  );
+  assert.throws(
+    () =>
+      parseSelection({
+        ...DEFAULT_SELECTION,
+        missingOnly: true,
+        existingOnly: true,
+      }),
+    /either/,
+  );
+  assert.throws(
+    () => parseSelection({ ...DEFAULT_SELECTION, priceRuleId: 12 }),
+    /price rule/,
+  );
+});
 test("all statuses include matched and failed products, excluding completed syncs", () =>
   assert.deepEqual(choose({}), ["1", "2", "3", "4"]));
 test("status selection narrows the remaining set", () =>

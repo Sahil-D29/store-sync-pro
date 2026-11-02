@@ -43,6 +43,13 @@ test(
     let failedHandle: string | null = null;
     let raceHandle: string | null = null;
     const mutationHandles: string[] = [];
+    const mutationInputs: Array<{
+      handle: string;
+      id?: string;
+      variants: Array<{ price: number }>;
+    }> = [];
+    const priceRuleIds: string[] = [];
+    let deleteOnUpdateHandle: string | null = null;
     const page = <T>(nodes: T[], after: string | null, limit: number) => {
       const start = after ? Number(after) : 0;
       const end = start + limit;
@@ -175,7 +182,22 @@ test(
         mutations++;
         const input = variables.input;
         mutationHandles.push(input.handle);
-        if (input.handle === raceHandle) {
+        mutationInputs.push(input);
+        if (input.handle === deleteOnUpdateHandle) {
+          const index = destination.findIndex((p) => p.id === input.id);
+          if (index >= 0) destination.splice(index, 1);
+          data = {
+            productSet: {
+              product: null,
+              userErrors: [
+                {
+                  code: "PRODUCT_DOES_NOT_EXIST",
+                  message: "Product does not exist",
+                },
+              ],
+            },
+          };
+        } else if (input.handle === raceHandle) {
           assert.equal(
             input.id,
             undefined,
@@ -604,12 +626,42 @@ test(
       });
       let missingState = await latestCatalog(owner, ready.rule.id);
       const writesBeforeMissing = mutations;
+      const chosenPrice = await db.priceRule.create({
+        data: {
+          ownerShop: owner,
+          name: "One operation markup",
+          type: "PERCENTAGE_MARKUP",
+          value: 20,
+          roundTo: null,
+        },
+      });
+      const foreignPrice = await db.priceRule.create({
+        data: {
+          ownerShop: "foreign-" + owner,
+          name: "Foreign price rule",
+          type: "FIXED_MARKUP",
+          value: 5,
+          roundTo: null,
+        },
+      });
+      priceRuleIds.push(chosenPrice.id, foreignPrice.id);
       const missingSelection = {
         ...DEFAULT_SELECTION,
         missingOnly: true,
         method: "MANUAL" as const,
         productIds: [source[0].id, source[6].id],
+        priceRuleId: chosenPrice.id,
       };
+      await assert.rejects(
+        startCatalogJob(
+          owner,
+          ready.rule.id,
+          "SYNC",
+          { ...missingSelection, priceRuleId: foreignPrice.id },
+          missingState.snapshotId!,
+        ),
+        /Price rule not found/,
+      );
       const copied = await wait(
         await startCatalogJob(
           owner,
@@ -621,6 +673,17 @@ test(
       );
       assert.equal(copied.status, "COMPLETED");
       assert.equal(mutations, writesBeforeMissing + 1);
+      assert.equal(
+        mutationInputs.at(-1)?.variants[0].price,
+        12,
+        "Add applies the selected operation price rule",
+      );
+      assert.equal(
+        (await db.syncRule.findUniqueOrThrow({ where: { id: ready.rule.id } }))
+          .priceRuleId,
+        null,
+        "Operation pricing must not change the saved rule",
+      );
       assert.equal(
         mutationHandles.at(-1),
         source[6].handle,
@@ -650,6 +713,97 @@ test(
       assert.equal((raced.result as { skipped: number }).skipped, 1);
       raceHandle = null;
 
+      missingState = await latestCatalog(owner, ready.rule.id);
+      const existingSelection = {
+        ...DEFAULT_SELECTION,
+        existingOnly: true,
+        method: "MANUAL" as const,
+        productIds: [source[6].id, source[9].id],
+        priceRuleId: chosenPrice.id,
+      };
+      const destinationCount = destination.length;
+      const updateWrites = mutations;
+      const updated = await wait(
+        await startCatalogJob(
+          owner,
+          ready.rule.id,
+          "SYNC",
+          existingSelection,
+          missingState.snapshotId!,
+        ),
+      );
+      assert.equal(updated.status, "COMPLETED");
+      assert.equal(
+        mutations,
+        updateWrites + 1,
+        "Update must exclude missing selected products",
+      );
+      assert.equal(
+        destination.length,
+        destinationCount,
+        "Update must not create products",
+      );
+      assert.ok(
+        mutationInputs.at(-1)?.id,
+        "Update targets an existing destination ID",
+      );
+      assert.equal(
+        mutationInputs.at(-1)?.variants[0].price,
+        12,
+        "Update applies the selected price rule even to already synced products",
+      );
+
+      await db.syncRule.update({
+        where: { id: ready.rule.id },
+        data: { priceRuleId: chosenPrice.id },
+      });
+      missingState = await latestCatalog(owner, ready.rule.id);
+      const unchanged = await wait(
+        await startCatalogJob(
+          owner,
+          ready.rule.id,
+          "SYNC",
+          { ...existingSelection, priceRuleId: null },
+          missingState.snapshotId!,
+        ),
+      );
+      assert.equal(unchanged.status, "COMPLETED");
+      assert.equal(
+        mutationInputs.at(-1)?.variants[0].price,
+        10,
+        "No operation price rule copies source prices unchanged",
+      );
+      assert.equal(
+        (await db.syncRule.findUniqueOrThrow({ where: { id: ready.rule.id } }))
+          .priceRuleId,
+        chosenPrice.id,
+        "The saved price rule is preserved",
+      );
+
+      missingState = await latestCatalog(owner, ready.rule.id);
+      deleteOnUpdateHandle = source[6].handle;
+      const deleted = await wait(
+        await startCatalogJob(
+          owner,
+          ready.rule.id,
+          "SYNC",
+          { ...existingSelection, priceRuleId: null },
+          missingState.snapshotId!,
+        ),
+      );
+      assert.equal(deleted.status, "COMPLETED");
+      assert.equal(
+        (deleted.result as { skipped: number }).skipped,
+        1,
+        "A destination deleted during update must be skipped",
+      );
+      assert.equal(
+        destination.length,
+        destinationCount - 1,
+        "Update must not recreate a concurrently deleted product",
+      );
+      deleteOnUpdateHandle = null;
+
       destinationUnavailable = true;
       assert.equal(
         (await wait(await startCatalogJob(owner, rule.id, "COMPARE"))).status,
@@ -665,6 +819,7 @@ test(
       await db.catalogJob.deleteMany({ where: { ownerShop: owner } });
       await db.syncJob.deleteMany({ where: { syncRuleId: rule.id } });
       await db.connectedStore.deleteMany({ where: { ownerShop: owner } });
+      await db.priceRule.deleteMany({ where: { id: { in: priceRuleIds } } });
       await db.session.deleteMany({
         where: { shop: { in: [owner, destDomain] } },
       });

@@ -69,7 +69,8 @@ export async function syncProduct(
   sourceClient: ShopifyGraphQLClient,
   destClient: ShopifyGraphQLClient,
   forceSync: boolean = false,
-  createOnly: boolean = false
+  createOnly: boolean = false,
+  updateOnly: boolean = false
 ): Promise<SyncProductResult> {
   const startTime = Date.now();
 
@@ -108,6 +109,9 @@ export async function syncProduct(
     });
 
     if (createOnly && existingMapping?.destProductGid) {
+      return { success: true, action: "SKIP", sourceGid: sourceProductGid, duration: Date.now() - startTime };
+    }
+    if (updateOnly && !existingMapping?.destProductGid) {
       return { success: true, action: "SKIP", sourceGid: sourceProductGid, duration: Date.now() - startTime };
     }
     if (!forceSync && existingMapping?.syncHash === currentHash && existingMapping.destProductGid) {
@@ -160,6 +164,9 @@ export async function syncProduct(
 
       // Handle PRODUCT_DOES_NOT_EXIST: stale mapping, clear it and retry as create
       const notExistError = errors.find(isProductDoesNotExistError);
+      if (notExistError && updateOnly) {
+        return { success: true, action: "SKIP", sourceGid: sourceProductGid, duration: Date.now() - startTime };
+      }
       if (notExistError && existingMapping?.destProductGid) {
         console.log(`[ProductSync] Dest product was deleted, clearing stale mapping and retrying as create`);
         await prisma.productMapping.delete({

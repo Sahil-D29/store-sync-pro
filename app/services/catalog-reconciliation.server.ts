@@ -1,4 +1,4 @@
-import type { Prisma } from "@prisma/client";
+import type { Prisma, PriceRule } from "@prisma/client";
 import prisma from "../db.server";
 import {
   createClientForStore,
@@ -41,10 +41,26 @@ export type CatalogResult = {
   failed: number;
   skipped: number;
   conflicts: string[];
+  priceRuleName?: string | null;
 };
 const asJson = (value: unknown) => value as Prisma.InputJsonValue;
 const errorMessage = (error: unknown) =>
   error instanceof Error ? error.message : String(error);
+
+async function operationPriceRule(
+  ownerShop: string,
+  priceRuleId?: string | null,
+) {
+  if (!priceRuleId) return null;
+  const priceRule = await prisma.priceRule.findFirst({
+    where: { id: priceRuleId, ownerShop },
+  });
+  if (!priceRule)
+    throw new Error(
+      "Price rule not found for this account. Refresh the available price rules.",
+    );
+  return priceRule;
+}
 
 export async function prepareMissingProducts(
   ownerShop: string,
@@ -455,6 +471,10 @@ export async function startCatalogJob(
   snapshotId?: string,
 ) {
   const rule = await accountRule(ownerShop, ruleId);
+  const selectedPriceRule =
+    operation === "SYNC"
+      ? await operationPriceRule(ownerShop, selection?.priceRuleId)
+      : null;
   await expireStaleJobs();
   let previewIds: string[] = [];
   if (operation === "SYNC") {
@@ -519,6 +539,7 @@ export async function startCatalogJob(
     operation,
     selection,
     previewIds,
+    selectedPriceRule,
   ).catch((error) =>
     console.error("[Catalog] Job failed", errorMessage(error)),
   );
@@ -532,6 +553,7 @@ async function runCatalogJob(
   operation: string,
   selection: CatalogSelection | undefined,
   previewIds: string[],
+  selectedPriceRule: PriceRule | null,
 ) {
   const heartbeat = async () => {
     const update = await prisma.catalogJob.updateMany({
@@ -550,6 +572,7 @@ async function runCatalogJob(
     failed: 0,
     skipped: 0,
     conflicts: [],
+    priceRuleName: selectedPriceRule?.name || null,
   };
   try {
     const rule = await accountRule(ownerShop, ruleId);
@@ -595,7 +618,10 @@ async function runCatalogJob(
         let logged = false;
         try {
           // Revalidate saved rule and product eligibility immediately before writing.
-          const currentRule = await accountRule(ownerShop, ruleId);
+          const currentRule = {
+            ...(await accountRule(ownerShop, ruleId)),
+            priceRule: selectedPriceRule,
+          };
           if (
             currentRule.sourceStoreId !== rule.sourceStoreId ||
             currentRule.destStoreId !== rule.destStoreId
@@ -629,6 +655,7 @@ async function runCatalogJob(
           });
           if (
             operation === "SYNC" &&
+            !selection?.existingOnly &&
             liveMapping?.status === "SYNCED" &&
             liveMapping.lastSyncedAt &&
             liveMapping.destProductGid
@@ -695,6 +722,10 @@ async function runCatalogJob(
             );
           }
           if (operation === "SYNC" && selection?.missingOnly && candidate) {
+            result.skipped++;
+            continue;
+          }
+          if (operation === "SYNC" && selection?.existingOnly && !candidate) {
             result.skipped++;
             continue;
           }
@@ -804,6 +835,7 @@ async function runCatalogJob(
               destClient,
               true,
               selection?.missingOnly === true,
+              selection?.existingOnly === true,
             );
             const extras =
               sync.success && sync.destGid

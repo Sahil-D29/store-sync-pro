@@ -13,6 +13,17 @@ handle exists. Existing products are excluded even if never mapped by the app.
 The `missingOnly` selection flag is revalidated before each create; a concurrent
 handle collision is skipped instead of taking the normal update fallback.
 The existing rule-based match and remaining-product update flows remain available.
+The homepage now separates **Add missing (count)** from **Update existing
+products**. Add previews contain only missing products; update previews contain
+only existing products, including previously synced ones. Status, collection,
+tag and manual selections narrow each operation's own product set.
+
+Both dialogs offer saved price rules plus a create-rule link. Pricing defaults
+to unchanged source prices. An optional `selection.priceRuleId` is checked against
+the owning account and applied in memory for that operation; the saved sync
+rule's price configuration is never modified. `selection.existingOnly` makes
+updates skip absent or concurrently deleted destination products, without using
+the sync engine's normal create fallback. It cannot be combined with `missingOnly`.
 Whole-store
 counts include Active, Draft, Unlisted and Archived products. The reconciliation
 counts apply the saved rule's eligibility filters. Counts come from fully
