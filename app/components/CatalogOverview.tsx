@@ -64,6 +64,7 @@ type CatalogData = {
     matched: number;
     unmatched: number;
     failed: number;
+    missing?: number;
   } | null;
   collections?: Array<{ id: string; title: string }>;
   tags?: string[];
@@ -204,10 +205,35 @@ function ConnectedStoreCountCard({
 }
 export function ConnectedCatalogOverview({
   stores,
+  onPrepared,
 }: {
   stores: CatalogStore[];
+  onPrepared?: (rule: Rule, jobId: string) => void;
 }) {
   const [refreshKey, setRefreshKey] = useState(0);
+  const [sourceId, setSourceId] = useState(
+    stores.find((s) => s.isBaseStore)?.id || stores[0]?.id || "",
+  );
+  const [destId, setDestId] = useState(
+    stores.find((s) => s.id !== sourceId)?.id || "",
+  );
+  const preparation = useFetcher<{
+    rule?: Rule;
+    jobId?: string;
+    error?: string;
+  }>();
+  const handled = useRef<string | null>(null);
+  useEffect(() => {
+    if (
+      preparation.state === "idle" &&
+      preparation.data?.rule &&
+      preparation.data.jobId &&
+      handled.current !== preparation.data.jobId
+    ) {
+      handled.current = preparation.data.jobId;
+      onPrepared?.(preparation.data.rule, preparation.data.jobId);
+    }
+  }, [preparation.state, preparation.data, onPrepared]);
   return (
     <BlockStack gap="400">
       <InlineStack align="space-between" gap="300" blockAlign="center">
@@ -238,9 +264,82 @@ export function ConnectedCatalogOverview({
       )}
       <Card>
         <BlockStack gap="300">
+          {stores.length >= 2 && (
+            <>
+              <Text as="h3" variant="headingMd">
+                Add products missing from your destination
+              </Text>
+              <Text as="p" tone="subdued">
+                Find source products that have no destination match by handle,
+                then choose statuses, collections, tags, or individual products
+                to copy. Existing destination products stay unchanged.
+              </Text>
+              <InlineGrid columns={{ xs: 1, sm: 2 }} gap="300">
+                <Select
+                  label="Source store"
+                  value={sourceId}
+                  options={stores.map((s) => ({
+                    label: storeName(s),
+                    value: s.id,
+                  }))}
+                  onChange={(value) => {
+                    setSourceId(value);
+                    if (value === destId)
+                      setDestId(stores.find((s) => s.id !== value)?.id || "");
+                  }}
+                />
+                <Select
+                  label="Destination store"
+                  value={destId}
+                  options={stores
+                    .filter((s) => s.id !== sourceId)
+                    .map((s) => ({ label: storeName(s), value: s.id }))}
+                  onChange={setDestId}
+                />
+              </InlineGrid>
+              <InlineStack>
+                <Button
+                  variant="primary"
+                  loading={preparation.state !== "idle"}
+                  disabled={
+                    !sourceId ||
+                    !destId ||
+                    sourceId === destId ||
+                    preparation.state !== "idle"
+                  }
+                  onClick={() =>
+                    preparation.submit(
+                      {
+                        intent: "PREPARE_MISSING",
+                        sourceStoreId: sourceId,
+                        destStoreId: destId,
+                      },
+                      {
+                        method: "POST",
+                        action: "/api/catalog",
+                        encType: "application/json",
+                      },
+                    )
+                  }
+                >
+                  Add missing products
+                </Button>
+              </InlineStack>
+              <Text as="p" variant="bodySm" tone="subdued">
+                Manual copy only. This does not enable automatic syncing. Source
+                prices and product statuses are preserved; plan limits apply.
+              </Text>
+              {preparation.data?.error && (
+                <Banner tone="warning">
+                  <p>{preparation.data.error}</p>
+                </Banner>
+              )}
+              <Divider />
+            </>
+          )}
           <Text as="p" tone="subdued">
             {stores.length
-              ? "Create an active product sync rule to match existing products and choose the remaining products to sync."
+              ? "For ongoing product updates, configure a sync rule."
               : "Connect your source and destination stores to see product totals and status breakdowns."}
           </Text>
           <InlineStack gap="200">
@@ -260,12 +359,22 @@ export function ConnectedCatalogOverview({
   );
 }
 export function CatalogOverview({
-  rules,
+  rules: savedRules,
   stores = [],
 }: {
   rules: Rule[];
   stores?: CatalogStore[];
 }) {
+  const [preparedRules, setPreparedRules] = useState<Rule[]>([]);
+  const rules = [
+    ...savedRules,
+    ...preparedRules.filter(
+      (r) => !savedRules.some((saved) => saved.id === r.id),
+    ),
+  ];
+  const [pendingMissingJob, setPendingMissingJob] = useState<string | null>(
+    null,
+  );
   const [storeRefreshKey, setStoreRefreshKey] = useState(0);
   const [ruleId, setRuleId] = useState(rules[0]?.id || "");
   const [open, setOpen] = useState(false);
@@ -281,6 +390,7 @@ export function CatalogOverview({
     error?: string;
     jobId?: string;
     ruleId?: string;
+    rule?: Rule;
   }>();
   const preview = useFetcher<Preview>();
   const initialized = useRef(new Set<string>());
@@ -332,6 +442,24 @@ export function CatalogOverview({
   useEffect(() => {
     if (
       operation.state === "idle" &&
+      operation.data?.rule &&
+      operation.data.jobId &&
+      submitted.current !== operation.data.jobId
+    ) {
+      const prepared = operation.data.rule;
+      submitted.current = operation.data.jobId;
+      setPreparedRules((current) => [
+        ...current.filter((r) => r.id !== prepared.id),
+        prepared,
+      ]);
+      setRuleId(prepared.id);
+      setSelection({ ...DEFAULT_SELECTION, missingOnly: true });
+      setPendingMissingJob(operation.data.jobId);
+      state.load(`/api/catalog?ruleId=${encodeURIComponent(prepared.id)}`);
+      return;
+    }
+    if (
+      operation.state === "idle" &&
       operation.data?.jobId &&
       operation.data.ruleId === ruleId &&
       submitted.current !== operation.data.jobId
@@ -361,6 +489,16 @@ export function CatalogOverview({
     return () => clearInterval(timer);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [job?.status, ruleId]);
+  useEffect(() => {
+    if (
+      !pendingMissingJob ||
+      job?.id !== pendingMissingJob ||
+      job.status === "RUNNING"
+    )
+      return;
+    if (available && data?.snapshotId === pendingMissingJob) setOpen(true);
+    setPendingMissingJob(null);
+  }, [pendingMissingJob, job, available, data?.snapshotId]);
   useEffect(() => {
     if (!open || !available) return;
     const timer = setTimeout(
@@ -393,7 +531,20 @@ export function CatalogOverview({
   const close = () => setOpen(false);
 
   if (!rules.length || !rule)
-    return <ConnectedCatalogOverview stores={stores} />;
+    return (
+      <ConnectedCatalogOverview
+        stores={stores}
+        onPrepared={(prepared, jobId) => {
+          setPreparedRules((current) => [
+            ...current.filter((r) => r.id !== prepared.id),
+            prepared,
+          ]);
+          setRuleId(prepared.id);
+          setSelection({ ...DEFAULT_SELECTION, missingOnly: true });
+          setPendingMissingJob(jobId);
+        }}
+      />
+    );
   return (
     <BlockStack gap="400">
       <InlineStack align="space-between" blockAlign="center" gap="300">
@@ -485,13 +636,14 @@ export function CatalogOverview({
               include the whole catalog.
             </Text>
           </BlockStack>
-          <InlineGrid columns={{ xs: 2, sm: 3, lg: 5 }} gap="300">
+          <InlineGrid columns={{ xs: 2, sm: 3 }} gap="300">
             {[
               ["Rule eligible", snapshot?.eligible],
               ["Successfully synced", snapshot?.synced],
               ["Matched, awaiting sync", snapshot?.matched],
               ["Unmatched", snapshot?.unmatched],
               ["Failed, ready to retry", snapshot?.failed],
+              ["Missing in destination", snapshot?.missing],
             ].map(([title, count]) => (
               <BlockStack gap="100" key={title}>
                 <Text as="p" tone="subdued">
@@ -507,14 +659,36 @@ export function CatalogOverview({
           </InlineGrid>
           <InlineStack gap="300">
             <Button
+              variant="primary"
+              disabled={running || !sourceStore || !destinationStore}
+              onClick={() =>
+                operation.submit(
+                  {
+                    intent: "PREPARE_MISSING",
+                    sourceStoreId: sourceStore!.id,
+                    destStoreId: destinationStore!.id,
+                  },
+                  {
+                    method: "POST",
+                    action: "/api/catalog",
+                    encType: "application/json",
+                  },
+                )
+              }
+            >
+              Add missing products
+            </Button>
+            <Button
               onClick={() => start("MATCH")}
               disabled={!available || running}
             >
               Match existing products
             </Button>
             <Button
-              variant="primary"
-              onClick={() => setOpen(true)}
+              onClick={() => {
+                setSelection((current) => ({ ...current, missingOnly: false }));
+                setOpen(true);
+              }}
               disabled={
                 !available || running || snapshot?.eligible === snapshot?.synced
               }
@@ -581,10 +755,14 @@ export function CatalogOverview({
       <Modal
         open={open}
         onClose={close}
-        title="Choose remaining products to sync"
+        title={
+          selection.missingOnly
+            ? "Add products missing from destination"
+            : "Choose remaining products to sync"
+        }
         size="large"
         primaryAction={{
-          content: `Sync ${currentPreview?.selectedCount ?? 0} selected products`,
+          content: `${selection.missingOnly ? "Add" : "Sync"} ${currentPreview?.selectedCount ?? 0} selected products`,
           onAction: () => {
             start("SYNC");
             close();
@@ -597,6 +775,9 @@ export function CatalogOverview({
           <BlockStack gap="400">
             <Banner tone="info">
               <p>
+                {selection.missingOnly
+                  ? "Only products missing from the destination will be copied. Existing products will not be updated. "
+                  : ""}
                 Only remaining products allowed by “{rule.name}” can be
                 selected. These filters apply to this run; your saved rule stays
                 unchanged.

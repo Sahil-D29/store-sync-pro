@@ -16,6 +16,7 @@ export type CatalogProduct = {
 export type RemainingProduct = CatalogProduct & {
   state: "SYNCED" | "MATCHED" | "UNMATCHED" | "FAILED";
   destId: string | null;
+  existsInDestination?: boolean;
 };
 export type CatalogSelection = {
   statuses: ProductStatus[];
@@ -24,6 +25,7 @@ export type CatalogSelection = {
   tags: string[];
   productIds: string[];
   tagMode: "ANY" | "ALL";
+  missingOnly?: boolean;
 };
 export const DEFAULT_SELECTION: CatalogSelection = {
   statuses: [...PRODUCT_STATUSES],
@@ -62,7 +64,10 @@ export function parseSelection(value: unknown): CatalogSelection {
     tags: strings("tags"),
     productIds: strings("productIds"),
     tagMode: input.tagMode,
+    missingOnly: input.missingOnly === true,
   } as CatalogSelection;
+  if (input.missingOnly !== undefined && typeof input.missingOnly !== "boolean")
+    throw new Error("Invalid missing-product selection");
   if (
     selection.collectionIds.some(
       (id) => !/^gid:\/\/shopify\/Collection\/\d+$/.test(id),
@@ -84,6 +89,7 @@ export function selectRemaining(
   const tags = selection.tags.map((tag) => tag.toLowerCase());
   return products.filter((p) => {
     if (p.state === "SYNCED" || !statuses.has(p.status)) return false;
+    if (selection.missingOnly && p.existsInDestination !== false) return false;
     switch (selection.method) {
       case "ALL":
         return true;

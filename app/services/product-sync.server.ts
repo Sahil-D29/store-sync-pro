@@ -68,7 +68,8 @@ export async function syncProduct(
   sourceProductGid: string,
   sourceClient: ShopifyGraphQLClient,
   destClient: ShopifyGraphQLClient,
-  forceSync: boolean = false
+  forceSync: boolean = false,
+  createOnly: boolean = false
 ): Promise<SyncProductResult> {
   const startTime = Date.now();
 
@@ -106,6 +107,9 @@ export async function syncProduct(
       },
     });
 
+    if (createOnly && existingMapping?.destProductGid) {
+      return { success: true, action: "SKIP", sourceGid: sourceProductGid, duration: Date.now() - startTime };
+    }
     if (!forceSync && existingMapping?.syncHash === currentHash && existingMapping.destProductGid) {
       return {
         success: true,
@@ -222,6 +226,9 @@ export async function syncProduct(
 
       // Handle HANDLE_NOT_UNIQUE: look up existing product on destination and retry as update
       const handleError = errors.find((e: any) => e.code === "HANDLE_NOT_UNIQUE");
+      if (handleError && createOnly) {
+        return { success: true, action: "SKIP", sourceGid: sourceProductGid, duration: Date.now() - startTime };
+      }
       if (handleError && isNewProduct) {
         console.log(`[ProductSync] Handle '${sourceProduct.handle}' exists on destination, looking up existing product`);
         const lookupResult = await destClient.queryWithRetry(

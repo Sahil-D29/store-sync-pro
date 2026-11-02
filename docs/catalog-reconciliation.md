@@ -4,7 +4,15 @@ The homepage shows connected-store product counts even when no sync rule exists.
 `GET /api/store-counts/:storeId` reads account-scoped Shopify counts independently
 for each store; errors in one store do not hide the other store's totals. The
 unlimited count query falls back to pagination if Shopify returns bounded counts.
-Matching and remaining-product selection require an active product sync rule.
+The homepage's **Add missing products** action works without prior rule setup:
+select a source and destination, then filter and preview the products to copy.
+Preparation creates or reuses a manual-only product rule and starts a comparison;
+it does not write Shopify products or enable scheduled/realtime syncing.
+Missing means neither a valid destination mapping nor an identical destination
+handle exists. Existing products are excluded even if never mapped by the app.
+The `missingOnly` selection flag is revalidated before each create; a concurrent
+handle collision is skipped instead of taking the normal update fallback.
+The existing rule-based match and remaining-product update flows remain available.
 Whole-store
 counts include Active, Draft, Unlisted and Archived products. The reconciliation
 counts apply the saved rule's eligibility filters. Counts come from fully
@@ -12,7 +20,9 @@ paginated catalog reads, rather than subtracting store totals.
 
 `GET /api/catalog?ruleId=...` returns account-scoped summary counts, source filter
 options and job progress. `POST /api/catalog` accepts JSON with `ruleId` and
-`intent`: `COMPARE`, `MATCH`, `SYNC`, or `preview`. Preview and sync accept a
+`intent`: `COMPARE`, `MATCH`, `SYNC`, `PREPARE_MISSING`, or `preview`.
+`PREPARE_MISSING` takes `sourceStoreId` and `destStoreId` and returns the manual
+rule and comparison job. Preview and sync accept a
 `selection` with `statuses`, `method`, `collectionIds`, `tags`, `productIds`, and
 `tagMode`. Sync also requires the preview's `snapshotId`. Preview supports search,
 20-product pages, and manual browsing; search never changes selection membership.

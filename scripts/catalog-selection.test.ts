@@ -72,6 +72,24 @@ const choose = (patch: Partial<CatalogSelection>) =>
   selectRemaining(products, { ...DEFAULT_SELECTION, ...patch }).map((p) =>
     p.id.split("/").at(-1),
   );
+test("missing-only selection excludes unmapped products whose handles already exist in destination", () => {
+  const candidates = products.map((p, index) => ({
+    ...p,
+    existsInDestination: index !== 0,
+  }));
+  assert.deepEqual(
+    selectRemaining(candidates, {
+      ...DEFAULT_SELECTION,
+      missingOnly: true,
+    }).map((p) => p.handle),
+    ["active"],
+  );
+  assert.deepEqual(
+    selectRemaining(products, { ...DEFAULT_SELECTION, missingOnly: true }),
+    [],
+    "Older snapshots without existence checks cannot copy existing products",
+  );
+});
 test("all statuses include matched and failed products, excluding completed syncs", () =>
   assert.deepEqual(choose({}), ["1", "2", "3", "4"]));
 test("status selection narrows the remaining set", () =>

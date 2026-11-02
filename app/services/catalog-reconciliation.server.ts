@@ -46,6 +46,78 @@ const asJson = (value: unknown) => value as Prisma.InputJsonValue;
 const errorMessage = (error: unknown) =>
   error instanceof Error ? error.message : String(error);
 
+export async function prepareMissingProducts(
+  ownerShop: string,
+  sourceStoreId: string,
+  destStoreId: string,
+) {
+  if (!sourceStoreId || !destStoreId || sourceStoreId === destStoreId)
+    throw new Error("Select different source and destination stores");
+  const stores = await prisma.connectedStore.findMany({
+    where: {
+      id: { in: [sourceStoreId, destStoreId] },
+      ownerShop,
+      status: "ACTIVE",
+    },
+  });
+  const source = stores.find((s) => s.id === sourceStoreId);
+  const destination = stores.find((s) => s.id === destStoreId);
+  if (!source || !destination)
+    throw new Error("Both stores must be active and belong to this account");
+  const name = "Homepage · Add missing products";
+  const rule = await prisma.$transaction(async (tx) => {
+    const key = `missing-products:${sourceStoreId}:${destStoreId}`;
+    await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtext(${key}))`;
+    const existing = await tx.syncRule.findFirst({
+      where: {
+        ownerShop,
+        sourceStoreId,
+        destStoreId,
+        name,
+        isActive: true,
+        syncProducts: true,
+        syncMode: "MANUAL",
+        filterType: "ALL",
+        priceRuleId: null,
+        excludedFields: null,
+        syncVariants: true,
+        syncInventory: false,
+        syncCollections: false,
+        destProductStatus: "SAME_AS_SOURCE",
+      },
+    });
+    return (
+      existing ||
+      tx.syncRule.create({
+        data: {
+          ownerShop,
+          sourceStoreId,
+          destStoreId,
+          name,
+          syncMode: "MANUAL",
+          filterType: "ALL",
+          syncInventory: false,
+          syncCollections: false,
+          destProductStatus: "SAME_AS_SOURCE",
+        },
+      })
+    );
+  });
+  const jobId = await startCatalogJob(ownerShop, rule.id, "COMPARE");
+  return {
+    jobId,
+    rule: {
+      id: rule.id,
+      name: rule.name,
+      sourceStore: { shopName: source.shopName, shopDomain: source.shopDomain },
+      destStore: {
+        shopName: destination.shopName,
+        shopDomain: destination.shopDomain,
+      },
+    },
+  };
+}
+
 export async function accountRule(ownerShop: string, ruleId: string) {
   const rule = await prisma.syncRule.findFirst({
     where: { id: ruleId, ownerShop },
@@ -300,6 +372,7 @@ async function scan(
         .map((log) => log.sourceGid),
     );
     const destinationIds = new Set(destination.map((p) => p.id));
+    const destinationHandles = new Set(destination.map((p) => p.handle));
     snapshot.products = source
       .filter((p) => matchesCatalogRule(p, rule))
       .map((p) => {
@@ -316,7 +389,12 @@ async function scan(
               : mapping?.status === "SYNCED" && mapping.lastSyncedAt
                 ? "SYNCED"
                 : "MATCHED";
-        return { ...p, state, destId };
+        return {
+          ...p,
+          state,
+          destId,
+          existsInDestination: !!destId || destinationHandles.has(p.handle),
+        };
       });
   }
   return { snapshot, destination: destination || [] };
@@ -581,6 +659,7 @@ async function runCatalogJob(
                 ...fresh,
                 state: scannedProduct.state,
                 destId: liveMapping?.destProductGid || scannedProduct.destId,
+                existsInDestination: scannedProduct.existsInDestination,
               }
             : null;
           if (
@@ -614,6 +693,10 @@ async function runCatalogJob(
             candidate = byHandle.products.nodes.find(
               (p) => p.handle === product.handle,
             );
+          }
+          if (operation === "SYNC" && selection?.missingOnly && candidate) {
+            result.skipped++;
+            continue;
           }
           const sourceVariants =
             operation === "SYNC" || candidate
@@ -720,6 +803,7 @@ async function runCatalogJob(
               sourceClient,
               destClient,
               true,
+              selection?.missingOnly === true,
             );
             const extras =
               sync.success && sync.destGid
@@ -749,7 +833,8 @@ async function runCatalogJob(
             });
             logged = true;
             if (!success) throw new Error(sync.error || extras.join("; "));
-            result.synced++;
+            if (sync.action === "SKIP") result.skipped++;
+            else result.synced++;
           }
         } catch (error) {
           result.failed++;

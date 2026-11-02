@@ -8,14 +8,59 @@ import { CatalogOverview } from "../app/components/CatalogOverview";
 
 test("connected source and destination count cards render with zero sync rules", () => {
   const stores = [
-    { id: "source", shopName: "Source catalog", shopDomain: "source.myshopify.com", isBaseStore: true },
-    { id: "destination", shopName: "Destination catalog", shopDomain: "destination.myshopify.com", isBaseStore: false },
+    {
+      id: "source",
+      shopName: "Source catalog",
+      shopDomain: "source.myshopify.com",
+      isBaseStore: true,
+    },
+    {
+      id: "destination",
+      shopName: "Destination catalog",
+      shopDomain: "destination.myshopify.com",
+      isBaseStore: false,
+    },
   ];
-  const router = createMemoryRouter([{ path: "/", element: <AppProvider i18n={en}><CatalogOverview rules={[]} stores={stores} /></AppProvider> }]);
+  const router = createMemoryRouter([
+    {
+      path: "/",
+      element: (
+        <AppProvider i18n={en}>
+          <CatalogOverview rules={[]} stores={stores} />
+        </AppProvider>
+      ),
+    },
+  ]);
   try {
-    const html = renderToString(<RouterProvider router={router} />);
-    for (const text of ["Source catalog", "Destination catalog", "Total products", "Active", "Draft", "Unlisted", "Archived", "Refresh all counts"]) assert.ok(html.includes(text), `Missing no-rule overview content: ${text}`);
-    assert.equal((html.match(/Total products/g) || []).length, 2);
-    assert.ok(html.includes("Create sync rule"), "Rule creation is still offered for matching and sync");
-  } finally { router.dispose(); }
+    const view = renderToString(<RouterProvider router={router} />);
+    for (const text of [
+      "Source catalog",
+      "Destination catalog",
+      "Total products",
+      "Active",
+      "Draft",
+      "Unlisted",
+      "Archived",
+      "Refresh all counts",
+    ])
+      assert.ok(
+        view.includes(text),
+        `Missing no-rule overview content: ${text}`,
+      );
+    assert.equal((view.match(/Total products/g) || []).length, 2);
+    assert.ok(
+      view.includes("Add missing products"),
+      "Adding missing products must be available with zero sync rules",
+    );
+    assert.ok(
+      view.includes("Source store") && view.includes("Destination store"),
+      "A store pair can be selected directly on the homepage",
+    );
+    assert.ok(
+      view.includes("Create sync rule"),
+      "Ongoing sync configuration remains available separately",
+    );
+  } finally {
+    router.dispose();
+  }
 });

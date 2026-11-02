@@ -5,6 +5,7 @@ import { getAccountShop } from "../services/store-management.server";
 import {
   latestCatalog,
   startCatalogJob,
+  prepareMissingProducts,
 } from "../services/catalog-reconciliation.server";
 import { parseSelection, selectRemaining } from "../services/catalog-selection";
 
@@ -30,6 +31,8 @@ export async function loader({ request }: LoaderFunctionArgs) {
               matched: products.filter((p) => p.state === "MATCHED").length,
               unmatched: products.filter((p) => p.state === "UNMATCHED").length,
               failed: products.filter((p) => p.state === "FAILED").length,
+              missing: products.filter((p) => p.existsInDestination === false)
+                .length,
             }
           : null,
         collections: [...collections.values()].sort((a, b) =>
@@ -54,6 +57,14 @@ export async function action({ request }: ActionFunctionArgs) {
     ruleId = typeof body.ruleId === "string" ? body.ruleId : "";
     requestKey =
       typeof body.requestKey === "string" ? body.requestKey : undefined;
+    if (body.intent === "PREPARE_MISSING") {
+      const prepared = await prepareMissingProducts(
+        ownerShop,
+        typeof body.sourceStoreId === "string" ? body.sourceStoreId : "",
+        typeof body.destStoreId === "string" ? body.destStoreId : "",
+      );
+      return json({ ...prepared, ruleId: prepared.rule.id });
+    }
     if (body.intent === "preview") {
       const selection = parseSelection(body.selection);
       const data = await latestCatalog(ownerShop, ruleId);

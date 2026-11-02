@@ -16,7 +16,7 @@ test(
     );
     process.env.DATABASE_URL = enabled;
     const { default: db } = await import("../app/db.server");
-    const { startCatalogJob, latestCatalog } =
+    const { startCatalogJob, latestCatalog, prepareMissingProducts } =
       await import("../app/services/catalog-reconciliation.server");
     const suffix = Date.now();
     const owner = `source-${suffix}.myshopify.com`;
@@ -41,6 +41,8 @@ test(
     let releaseCatalog: (() => void) | undefined;
     let mutations = 0;
     let failedHandle: string | null = null;
+    let raceHandle: string | null = null;
+    const mutationHandles: string[] = [];
     const page = <T>(nodes: T[], after: string | null, limit: number) => {
       const start = after ? Number(after) : 0;
       const end = start + limit;
@@ -72,9 +74,26 @@ test(
           { status: 200 },
         );
       if (query.includes("DashboardStoreCounts")) {
-        data = Object.fromEntries(["total", "active", "draft", "unlisted", "archived"].map(key => [key, { count: key === "total" ? list.length : list.filter(p => p.status === key.toUpperCase()).length, precision: boundedCounts ? "AT_LEAST" : "EXACT" }]));
+        data = Object.fromEntries(
+          ["total", "active", "draft", "unlisted", "archived"].map((key) => [
+            key,
+            {
+              count:
+                key === "total"
+                  ? list.length
+                  : list.filter((p) => p.status === key.toUpperCase()).length,
+              precision: boundedCounts ? "AT_LEAST" : "EXACT",
+            },
+          ]),
+        );
       } else if (query.includes("DashboardStoreStatusPage")) {
-        data = { products: page(list.map(p => ({ status: p.status })), variables.after, 20) };
+        data = {
+          products: page(
+            list.map((p) => ({ status: p.status })),
+            variables.after,
+            20,
+          ),
+        };
       } else if (query.includes("DashboardCatalog")) {
         if (isSource && catalogGate) await catalogGate;
         data = {
@@ -155,7 +174,26 @@ test(
         assert.equal(isSource, false, "Source products must never be mutated");
         mutations++;
         const input = variables.input;
-        if (input.handle === failedHandle)
+        mutationHandles.push(input.handle);
+        if (input.handle === raceHandle) {
+          assert.equal(
+            input.id,
+            undefined,
+            "Missing-product sync must create, not update",
+          );
+          destination.push({
+            ...source.find((p) => p.handle === input.handle)!,
+            id: "gid://shopify/Product/5555",
+          });
+          data = {
+            productSet: {
+              product: null,
+              userErrors: [
+                { code: "HANDLE_NOT_UNIQUE", message: "Handle already exists" },
+              ],
+            },
+          };
+        } else if (input.handle === failedHandle)
           data = {
             productSet: {
               product: null,
@@ -235,23 +273,90 @@ test(
       throw new Error("Catalog job timed out");
     };
     try {
-      const { getStoreCatalogCounts } = await import("../app/services/store-catalog.server");
-      await db.syncRule.update({ where: { id: rule.id }, data: { isActive: false } });
-      assert.equal(await db.syncRule.count({ where: { ownerShop: owner, isActive: true } }), 0);
+      const { getStoreCatalogCounts } =
+        await import("../app/services/store-catalog.server");
+      await db.syncRule.update({
+        where: { id: rule.id },
+        data: { isActive: false },
+      });
+      assert.equal(
+        await db.syncRule.count({
+          where: { ownerShop: owner, isActive: true },
+        }),
+        0,
+      );
       const independentSource = await getStoreCatalogCounts(owner, src.id);
-      assert.equal(independentSource.counts.total, 27, "Source count is available without any active rule");
+      assert.equal(
+        independentSource.counts.total,
+        27,
+        "Source count is available without any active rule",
+      );
       assert.equal(independentSource.counts.UNLISTED, 7);
-      assert.equal((await getStoreCatalogCounts(owner, dst.id)).counts.total, 3, "Destination count is available without any active rule");
-      await assert.rejects(getStoreCatalogCounts("another-account.myshopify.com", src.id), /not found/);
+      assert.equal(
+        (await getStoreCatalogCounts(owner, dst.id)).counts.total,
+        3,
+        "Destination count is available without any active rule",
+      );
+      await assert.rejects(
+        getStoreCatalogCounts("another-account.myshopify.com", src.id),
+        /not found/,
+      );
       boundedCounts = true;
-      assert.equal((await getStoreCatalogCounts(owner, src.id)).counts.total, 27, "Bounded counts fall back to a fully paginated exact count");
+      assert.equal(
+        (await getStoreCatalogCounts(owner, src.id)).counts.total,
+        27,
+        "Bounded counts fall back to a fully paginated exact count",
+      );
       boundedCounts = false;
-      await db.syncRule.update({ where: { id: rule.id }, data: { isActive: true } });
-      const { triggerManualSync } = await import("../app/services/sync-engine.server");
+      const prepared = await prepareMissingProducts(owner, src.id, dst.id);
+      assert.equal((await wait(prepared.jobId)).status, "COMPLETED");
+      const manualRule = await db.syncRule.findUniqueOrThrow({
+        where: { id: prepared.rule.id },
+      });
+      assert.equal(
+        manualRule.syncMode,
+        "MANUAL",
+        "Homepage preparation must not enable realtime syncing",
+      );
+      assert.equal(manualRule.syncInventory, false);
+      assert.equal(manualRule.syncCollections, false);
+      const unlinked = await latestCatalog(owner, prepared.rule.id);
+      assert.equal(
+        unlinked.snapshot?.products.filter(
+          (p) => p.existsInDestination === false,
+        ).length,
+        24,
+        "Existing handles are excluded even without app mappings",
+      );
+      assert.equal(
+        mutations,
+        0,
+        "Preparing a missing-product selection must not write Shopify products",
+      );
+      await assert.rejects(
+        prepareMissingProducts("another-account.myshopify.com", src.id, dst.id),
+        /belong/,
+      );
+      await db.syncRule.update({
+        where: { id: rule.id },
+        data: { isActive: true },
+      });
+      const { triggerManualSync } =
+        await import("../app/services/sync-engine.server");
       const empty = await triggerManualSync(rule.id, []);
-      assert.equal(empty.queued, 0, "An explicit empty selection must not fall back to the whole catalog");
-      assert.equal((await db.syncJob.findUniqueOrThrow({ where: { id: empty.jobId } })).status, "COMPLETED");
-      catalogGate = new Promise<void>(resolve => { releaseCatalog = resolve; });
+      assert.equal(
+        empty.queued,
+        0,
+        "An explicit empty selection must not fall back to the whole catalog",
+      );
+      assert.equal(
+        (await db.syncJob.findUniqueOrThrow({ where: { id: empty.jobId } }))
+          .status,
+        "COMPLETED",
+      );
+      catalogGate = new Promise<void>((resolve) => {
+        releaseCatalog = resolve;
+      });
       const compareId = await startCatalogJob(owner, rule.id, "COMPARE");
       await assert.rejects(
         startCatalogJob(owner, rule.id, "COMPARE"),
@@ -481,6 +586,69 @@ test(
         ).activePair,
         null,
       );
+
+      await db.usageTracker.update({
+        where: { shopDomain: owner },
+        data: { syncedProductCount: 0 },
+      });
+      const ready = await prepareMissingProducts(owner, src.id, dst.id);
+      assert.equal(
+        ready.rule.id,
+        prepared.rule.id,
+        "Repeated use reuses the manual-only rule",
+      );
+      await wait(ready.jobId);
+      await db.syncRule.update({
+        where: { id: ready.rule.id },
+        data: { syncImages: false, syncMetafields: false },
+      });
+      let missingState = await latestCatalog(owner, ready.rule.id);
+      const writesBeforeMissing = mutations;
+      const missingSelection = {
+        ...DEFAULT_SELECTION,
+        missingOnly: true,
+        method: "MANUAL" as const,
+        productIds: [source[0].id, source[6].id],
+      };
+      const copied = await wait(
+        await startCatalogJob(
+          owner,
+          ready.rule.id,
+          "SYNC",
+          missingSelection,
+          missingState.snapshotId!,
+        ),
+      );
+      assert.equal(copied.status, "COMPLETED");
+      assert.equal(mutations, writesBeforeMissing + 1);
+      assert.equal(
+        mutationHandles.at(-1),
+        source[6].handle,
+        "The existing selected product must not be updated",
+      );
+      missingState = await latestCatalog(owner, ready.rule.id);
+      raceHandle = source[7].handle;
+      const raced = await wait(
+        await startCatalogJob(
+          owner,
+          ready.rule.id,
+          "SYNC",
+          {
+            ...DEFAULT_SELECTION,
+            missingOnly: true,
+            method: "MANUAL",
+            productIds: [source[7].id],
+          },
+          missingState.snapshotId!,
+        ),
+      );
+      assert.equal(
+        raced.status,
+        "COMPLETED",
+        "A concurrent handle collision is skipped instead of updated",
+      );
+      assert.equal((raced.result as { skipped: number }).skipped, 1);
+      raceHandle = null;
 
       destinationUnavailable = true;
       assert.equal(
