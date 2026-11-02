@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from "react";
-import { useFetcher } from "@remix-run/react";
+import { useFetcher, useNavigate } from "@remix-run/react";
 import {
   Badge,
   Banner,
@@ -366,6 +366,7 @@ export function CatalogOverview({
   rules: Rule[];
   stores?: CatalogStore[];
 }) {
+  const navigate = useNavigate();
   const [preparedRules, setPreparedRules] = useState<Rule[]>([]);
   const rules = [
     ...savedRules,
@@ -396,6 +397,7 @@ export function CatalogOverview({
   const preview = useFetcher<Preview>();
   const initialized = useRef(new Set<string>());
   const submitted = useRef<string | null>(null);
+  const refreshedFinishedJob = useRef<string | null>(null);
   const data = state.data?.ruleId === ruleId ? state.data : undefined;
   const job = data?.job;
   const snapshot = data?.snapshot;
@@ -490,6 +492,17 @@ export function CatalogOverview({
     return () => clearInterval(timer);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [job?.status, ruleId]);
+  useEffect(() => {
+    if (
+      job?.operation === "SYNC" &&
+      job.status !== "RUNNING" &&
+      submitted.current === job.id &&
+      refreshedFinishedJob.current !== job.id
+    ) {
+      refreshedFinishedJob.current = job.id;
+      setStoreRefreshKey((value) => value + 1);
+    }
+  }, [job?.id, job?.status, job?.operation]);
   useEffect(() => {
     if (
       !pendingMissingJob ||
@@ -735,7 +748,9 @@ export function CatalogOverview({
                   {job?.operation === "MATCH"
                     ? "Matching existing products"
                     : job?.operation === "SYNC"
-                      ? "Syncing selected products"
+                      ? job.result?.phase === "REFRESHING_COUNTS"
+                        ? "Product work finished · refreshing counts"
+                        : "Processing selected products"
                       : "Comparing catalogs"}
                   {job?.total
                     ? ` · ${job.processed} of ${job.total}`
@@ -825,7 +840,12 @@ export function CatalogOverview({
                 helpText="Applies only to the selected products in this operation. Your saved sync-rule settings will not change."
               />
               <InlineStack gap="200">
-                <Button url="/app/price-rules" target="_blank">
+                <Button
+                  onClick={() => {
+                    close();
+                    navigate("/app/price-rules");
+                  }}
+                >
                   Create price rule
                 </Button>
                 <Button onClick={reload} loading={state.state !== "idle"}>

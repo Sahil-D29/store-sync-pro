@@ -50,6 +50,8 @@ test(
     }> = [];
     const priceRuleIds: string[] = [];
     let deleteOnUpdateHandle: string | null = null;
+    let fullCatalogReads = 0;
+    const selectedSourceReads: string[] = [];
     const page = <T>(nodes: T[], after: string | null, limit: number) => {
       const start = after ? Number(after) : 0;
       const end = start + limit;
@@ -102,6 +104,7 @@ test(
           ),
         };
       } else if (query.includes("DashboardCatalog")) {
+        fullCatalogReads++;
         if (isSource && catalogGate) await catalogGate;
         data = {
           products: page(
@@ -116,6 +119,7 @@ test(
           ),
         };
       } else if (query.includes("DashboardCurrentProduct")) {
+        if (isSource) selectedSourceReads.push(variables.id);
         data = {
           product: product
             ? { ...product, collections: page(product.collections, null, 100) }
@@ -608,6 +612,25 @@ test(
         ).activePair,
         null,
       );
+      const legacyScan = await db.catalogJob.create({
+        data: {
+          ownerShop: owner,
+          syncRuleId: rule.id,
+          operation: "SYNC",
+          total: 0,
+          activePair: `${src.id}:${dst.id}`,
+        },
+      });
+      await latestCatalog(owner, rule.id);
+      assert.equal(
+        (
+          await db.catalogJob.findUniqueOrThrow({
+            where: { id: legacyScan.id },
+          })
+        ).status,
+        "FAILED",
+        "An obsolete selected sync stuck scanning catalogs is released on upgrade",
+      );
 
       await db.usageTracker.update({
         where: { shopDomain: owner },
@@ -662,16 +685,39 @@ test(
         ),
         /Price rule not found/,
       );
-      const copied = await wait(
-        await startCatalogJob(
-          owner,
-          ready.rule.id,
-          "SYNC",
-          missingSelection,
-          missingState.snapshotId!,
-        ),
+      const catalogReadsBeforeCopy = fullCatalogReads;
+      const sourceReadsBeforeCopy = selectedSourceReads.length;
+      const copyJobId = await startCatalogJob(
+        owner,
+        ready.rule.id,
+        "SYNC",
+        missingSelection,
+        missingState.snapshotId!,
       );
+      assert.equal(
+        (await db.catalogJob.findUniqueOrThrow({ where: { id: copyJobId } }))
+          .total,
+        1,
+        "The selected-product count is visible as soon as the job starts",
+      );
+      const copied = await wait(copyJobId);
       assert.equal(copied.status, "COMPLETED");
+      assert.equal(
+        fullCatalogReads,
+        catalogReadsBeforeCopy,
+        "A one-product sync must not rescan either full catalog before or after writing",
+      );
+      assert.ok(
+        selectedSourceReads
+          .slice(sourceReadsBeforeCopy)
+          .every((id) => id === source[6].id),
+        "Only the selected source product may be revalidated",
+      );
+      assert.equal(
+        (await latestCatalog(owner, ready.rule.id)).snapshot?.products.length,
+        27,
+        "Targeted refresh preserves other comparison rows",
+      );
       assert.equal(mutations, writesBeforeMissing + 1);
       assert.equal(
         mutationInputs.at(-1)?.variants[0].price,

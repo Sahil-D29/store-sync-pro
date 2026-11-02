@@ -6,6 +6,7 @@ import {
 } from "./shopify-client.server";
 import { syncProduct } from "./product-sync.server";
 import { syncProductExtras } from "./product-extras.server";
+import { getStoreCatalogCounts } from "./store-catalog.server";
 import {
   PRODUCT_STATUSES,
   matchesCatalogRule,
@@ -34,6 +35,7 @@ export type CatalogSnapshot = {
   destError: string | null;
   products: RemainingProduct[];
   refreshedAt: string;
+  lastFullComparisonAt?: string;
 };
 export type CatalogResult = {
   matched: number;
@@ -42,6 +44,7 @@ export type CatalogResult = {
   skipped: number;
   conflicts: string[];
   priceRuleName?: string | null;
+  phase?: "PROCESSING" | "REFRESHING_COUNTS" | "COMPLETE";
 };
 const asJson = (value: unknown) => value as Prisma.InputJsonValue;
 const errorMessage = (error: unknown) =>
@@ -359,6 +362,7 @@ async function scan(
       settled[1].status === "rejected" ? errorMessage(settled[1].reason) : null,
     products: [],
     refreshedAt: new Date().toISOString(),
+    lastFullComparisonAt: new Date().toISOString(),
   };
   if (source && destination) {
     const [mappings, failures] = await Promise.all([
@@ -416,6 +420,97 @@ async function scan(
   return { snapshot, destination: destination || [] };
 }
 
+async function refreshSelectedSnapshot(
+  rule: Awaited<ReturnType<typeof accountRule>>,
+  baseline: CatalogSnapshot,
+  productIds: string[],
+  heartbeat: () => Promise<void>,
+): Promise<CatalogSnapshot> {
+  const sourceClient = await createClientForStore(rule.sourceStoreId);
+  const destClient = await createClientForStore(rule.destStoreId);
+  const refreshed = new Map<string, RemainingProduct>();
+  for (const id of productIds) {
+    await heartbeat();
+    const product = await currentProduct(sourceClient, id);
+    if (!product || !matchesCatalogRule(product, rule)) continue;
+    const [mapping, latestLog] = await Promise.all([
+      prisma.productMapping.findUnique({
+        where: {
+          sourceStoreId_destStoreId_sourceProductGid: {
+            sourceStoreId: rule.sourceStoreId,
+            destStoreId: rule.destStoreId,
+            sourceProductGid: id,
+          },
+        },
+      }),
+      prisma.syncLog.findFirst({
+        where: { syncRuleId: rule.id, resourceType: "PRODUCT", sourceGid: id },
+        orderBy: { createdAt: "desc" },
+        select: { status: true },
+      }),
+    ]);
+    let destination: { id: string; handle: string } | null = null;
+    let destId: string | null = null;
+    if (mapping?.destProductGid) {
+      const data: { product: { id: string; handle: string } | null } =
+        await query(
+          destClient,
+          `query DashboardMappedProduct($id: ID!) { product(id: $id) { id handle } }`,
+          { id: mapping.destProductGid },
+        );
+      destination = data.product;
+      destId = destination?.id || null;
+    }
+    if (!destination) {
+      const data: {
+        products: { nodes: Array<{ id: string; handle: string }> };
+      } = await query(destClient, HANDLE_QUERY, {
+        query: `handle:${JSON.stringify(product.handle)}`,
+      });
+      destination =
+        data.products.nodes.find((p) => p.handle === product.handle) || null;
+    }
+    const state =
+      latestLog?.status === "FAILED" || mapping?.status === "ERROR"
+        ? "FAILED"
+        : !destId
+          ? "UNMATCHED"
+          : mapping?.status === "SYNCED" && mapping.lastSyncedAt
+            ? "SYNCED"
+            : "MATCHED";
+    refreshed.set(id, {
+      ...product,
+      state,
+      destId,
+      existsInDestination: !!destination,
+    });
+  }
+  const ids = new Set(productIds);
+  const [sourceCounts, destCounts] = await Promise.allSettled([
+    getStoreCatalogCounts(rule.ownerShop!, rule.sourceStoreId),
+    getStoreCatalogCounts(rule.ownerShop!, rule.destStoreId),
+  ]);
+  return {
+    ...baseline,
+    products: [
+      ...baseline.products.filter((p) => !ids.has(p.id)),
+      ...refreshed.values(),
+    ],
+    sourceCounts:
+      sourceCounts.status === "fulfilled" ? sourceCounts.value.counts : null,
+    destCounts:
+      destCounts.status === "fulfilled" ? destCounts.value.counts : null,
+    sourceError:
+      sourceCounts.status === "rejected"
+        ? errorMessage(sourceCounts.reason)
+        : null,
+    destError:
+      destCounts.status === "rejected" ? errorMessage(destCounts.reason) : null,
+    lastFullComparisonAt: baseline.lastFullComparisonAt || baseline.refreshedAt,
+    refreshedAt: new Date().toISOString(),
+  };
+}
+
 export async function latestCatalog(ownerShop: string, ruleId: string) {
   await accountRule(ownerShop, ruleId);
   await expireStaleJobs();
@@ -450,6 +545,19 @@ export async function latestCatalog(ownerShop: string, ruleId: string) {
   };
 }
 async function expireStaleJobs() {
+  // Older releases started selected syncs with total=0 while scanning every
+  // product. New jobs always have a nonzero selected total at creation. Release
+  // these obsolete jobs so an upgrade cannot leave the merchant stuck waiting.
+  await prisma.catalogJob.updateMany({
+    where: { status: "RUNNING", operation: "SYNC", total: 0 },
+    data: {
+      status: "FAILED",
+      error:
+        "This older job was interrupted while scanning catalogs. Select your products and retry with the faster selected-product flow.",
+      activePair: null,
+      completedAt: new Date(),
+    },
+  });
   await prisma.catalogJob.updateMany({
     where: {
       status: "RUNNING",
@@ -477,6 +585,7 @@ export async function startCatalogJob(
       : null;
   await expireStaleJobs();
   let previewIds: string[] = [];
+  let previewSnapshot: CatalogSnapshot | null = null;
   if (operation === "SYNC") {
     if (!selection || !snapshotId)
       throw new Error("Preview your selection before syncing");
@@ -491,6 +600,7 @@ export async function startCatalogJob(
     const snapshot = preview?.snapshot as CatalogSnapshot | null;
     if (!snapshot || snapshot.sourceError || snapshot.destError)
       throw new Error("Refresh the catalog before syncing");
+    previewSnapshot = snapshot;
     previewIds = selectRemaining(snapshot.products, selection).map((p) => p.id);
     if (!previewIds.length)
       throw new Error("No remaining products match this selection");
@@ -520,7 +630,13 @@ export async function startCatalogJob(
       )
         throw new Error("A product sync is already running for these stores");
       return tx.catalogJob.create({
-        data: { ownerShop, syncRuleId: ruleId, operation, activePair: pair },
+        data: {
+          ownerShop,
+          syncRuleId: ruleId,
+          operation,
+          activePair: pair,
+          total: operation === "SYNC" ? previewIds.length : 0,
+        },
       });
     });
   } catch (error) {
@@ -540,6 +656,7 @@ export async function startCatalogJob(
     selection,
     previewIds,
     selectedPriceRule,
+    previewSnapshot,
   ).catch((error) =>
     console.error("[Catalog] Job failed", errorMessage(error)),
   );
@@ -554,6 +671,7 @@ async function runCatalogJob(
   selection: CatalogSelection | undefined,
   previewIds: string[],
   selectedPriceRule: PriceRule | null,
+  previewSnapshot: CatalogSnapshot | null,
 ) {
   const heartbeat = async () => {
     const update = await prisma.catalogJob.updateMany({
@@ -573,10 +691,24 @@ async function runCatalogJob(
     skipped: 0,
     conflicts: [],
     priceRuleName: selectedPriceRule?.name || null,
+    phase: "PROCESSING",
   };
   try {
     const rule = await accountRule(ownerShop, ruleId);
-    const initial = await scan(rule, heartbeat);
+    // Selection was already previewed against a saved comparison. Revalidate
+    // only those IDs below; full-store scans are reserved for Compare/Match.
+    const requestedIds = new Set(previewIds);
+    const initial =
+      operation === "SYNC" && previewSnapshot
+        ? {
+            snapshot: {
+              ...previewSnapshot,
+              products: previewSnapshot.products.filter((p) =>
+                requestedIds.has(p.id),
+              ),
+            },
+          }
+        : await scan(rule, heartbeat);
     if (
       operation !== "COMPARE" &&
       (initial.snapshot.sourceError || initial.snapshot.destError)
@@ -895,10 +1027,27 @@ async function runCatalogJob(
         }
       }
     }
+    if (operation === "SYNC") {
+      result.phase = "REFRESHING_COUNTS";
+      await prisma.catalogJob.updateMany({
+        where: { id, status: "RUNNING" },
+        data: { result: asJson(result) },
+      });
+    }
     const final =
-      operation === "COMPARE"
-        ? initial
-        : await scan(await accountRule(ownerShop, ruleId), heartbeat);
+      operation === "SYNC" && previewSnapshot
+        ? {
+            snapshot: await refreshSelectedSnapshot(
+              await accountRule(ownerShop, ruleId),
+              previewSnapshot,
+              previewIds,
+              heartbeat,
+            ),
+          }
+        : operation === "COMPARE"
+          ? initial
+          : await scan(await accountRule(ownerShop, ruleId), heartbeat);
+    result.phase = "COMPLETE";
     await heartbeat();
     await prisma.catalogJob.updateMany({
       where: { id, status: "RUNNING" },

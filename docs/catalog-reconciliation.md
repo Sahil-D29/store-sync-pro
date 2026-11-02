@@ -18,8 +18,10 @@ products**. Add previews contain only missing products; update previews contain
 only existing products, including previously synced ones. Status, collection,
 tag and manual selections narrow each operation's own product set.
 
-Both dialogs offer saved price rules plus a create-rule link. Pricing defaults
-to unchanged source prices. An optional `selection.priceRuleId` is checked against
+Both dialogs offer saved price rules plus a create-rule button.
+The create-rule button navigates to the app's existing Price Rules sidebar route
+inside the embedded app, instead of opening the hosted URL in a new tab.
+Pricing defaults to unchanged source prices. An optional `selection.priceRuleId` is checked against
 the owning account and applied in memory for that operation; the saved sync
 rule's price configuration is never modified. `selection.existingOnly` makes
 updates skip absent or concurrently deleted destination products, without using
@@ -46,6 +48,13 @@ products using existing rule settings and billing checks. Variant conflicts and
 products exceeding the existing sync engine's 100-variant limit are reported
 without product updates.
 
+Selected add/update jobs use the saved preview and revalidate only selected
+source products, their rule eligibility and live destination matches. They do
+not perform a full-catalog scan before or after syncing. Completion merges those
+rows into the saved comparison and refreshes whole-store totals with count queries;
+`lastFullComparisonAt` retains the timestamp of the last complete comparison.
+Full catalog scans remain available through Compare and Match. Job totals are
+set immediately, and progress distinguishes product processing from count refresh.
 Jobs run in the web process, as existing manual syncs do. Progress and completed
 snapshots persist in `CatalogJob`; a unique store-pair lease and PostgreSQL
 advisory locks prevent concurrent dashboard/manual jobs for the same pair. Leases
