@@ -1,5 +1,9 @@
 import prisma from "../db.server";
 import { decrypt } from "../utils/encryption.server";
+import {
+  createShopifyAdminHttpError,
+  ShopifyHttpError,
+} from "../utils/shopify-api-error.server";
 
 const API_VERSION = "2026-04";
 
@@ -100,16 +104,11 @@ export class ShopifyGraphQLClient {
     }
 
     if (!response.ok) {
-      // 401/403 means the access token for this shop is invalid or revoked.
-      // Name the shop so logs make it obvious WHICH store needs reconnecting.
-      if (response.status === 401 || response.status === 403) {
-        throw new Error(
-          `Shopify API error: ${response.status} Unauthorized for ${this.shopDomain} — the access token is invalid or expired. Reconnect this store (reinstall the app on it) to mint a fresh token.`
-        );
-      }
-      throw new Error(
-        `Shopify API error: ${response.status} ${response.statusText} (${this.shopDomain})`
-      );
+      throw createShopifyAdminHttpError(response, {
+        shopDomain: this.shopDomain,
+        apiSurface: "admin_graphql",
+        operation: "graphql_query",
+      });
     }
 
     const result: GraphQLResponse<T> = await response.json();
@@ -151,6 +150,9 @@ export class ShopifyGraphQLClient {
         return result;
       } catch (error) {
         lastError = error as Error;
+        if (error instanceof ShopifyHttpError && !error.retryable) {
+          throw error;
+        }
         if (attempt < maxRetries - 1) {
           await sleep(Math.pow(2, attempt) * 1000 + Math.random() * 1000);
         }
@@ -184,9 +186,11 @@ export class ShopifyGraphQLClient {
     }
 
     if (!response.ok) {
-      throw new Error(
-        `Shopify REST API error: ${response.status} ${response.statusText} (${this.shopDomain})`
-      );
+      throw createShopifyAdminHttpError(response, {
+        shopDomain: this.shopDomain,
+        apiSurface: "admin_rest",
+        operation: "rest_get",
+      });
     }
 
     return response.json();
@@ -216,15 +220,11 @@ export class ShopifyGraphQLClient {
     }
 
     if (!response.ok) {
-      const errorBody = await response.text().catch(() => "");
-      if (response.status === 401 || response.status === 403) {
-        throw new Error(
-          `Shopify REST API error: ${response.status} Unauthorized for ${this.shopDomain} - the access token is invalid or expired. Reconnect this store (reinstall the app on it) to mint a fresh token.`
-        );
-      }
-      throw new Error(
-        `Shopify REST API error: ${response.status} ${response.statusText} (${this.shopDomain})${errorBody ? `: ${errorBody}` : ""}`
-      );
+      throw createShopifyAdminHttpError(response, {
+        shopDomain: this.shopDomain,
+        apiSurface: "admin_rest",
+        operation: "rest_post",
+      });
     }
 
     const text = await response.text();

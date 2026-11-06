@@ -1,5 +1,6 @@
 import type { BillingPlan, SubscriptionStatus } from "@prisma/client";
 import prisma from "../db.server";
+import { createShopifyAdminHttpError } from "../utils/shopify-api-error.server";
 
 export const BILLING_PLANS = {
   FREE: {
@@ -267,11 +268,16 @@ function statusFromAdminSubscription(
 }
 
 async function getShopifyBillingContext(
-  admin: ShopifyAdminClient
+  admin: ShopifyAdminClient,
+  shopDomain: string
 ): Promise<ShopifyBillingContext> {
   const response = await admin.graphql(GET_SHOPIFY_BILLING_CONTEXT_QUERY);
   if (!response.ok) {
-    throw new Error(`Shopify context query failed with ${response.status}`);
+    throw createShopifyAdminHttpError(response, {
+      shopDomain,
+      apiSurface: "admin_graphql",
+      operation: "billing_context",
+    });
   }
 
   const result = await response.json();
@@ -338,11 +344,16 @@ async function queryPartnerActiveSubscription(
 }
 
 async function queryAdminActiveSubscriptions(
-  admin: ShopifyAdminClient
+  admin: ShopifyAdminClient,
+  shopDomain: string
 ): Promise<AdminActiveSubscription[]> {
   const response = await admin.graphql(GET_ADMIN_ACTIVE_SUBSCRIPTIONS_QUERY);
   if (!response.ok) {
-    throw new Error(`Shopify Admin subscription query failed with ${response.status}`);
+    throw createShopifyAdminHttpError(response, {
+      shopDomain,
+      apiSurface: "admin_graphql",
+      operation: "billing_active_subscriptions",
+    });
   }
 
   const result = await response.json();
@@ -423,7 +434,10 @@ async function syncSubscriptionFromAdminFallback(
     return { subscription, warning: null };
   }
 
-  const activeSubscriptions = await queryAdminActiveSubscriptions(admin);
+  const activeSubscriptions = await queryAdminActiveSubscriptions(
+    admin,
+    shopDomain
+  );
 
   if (activeSubscriptions.length === 0) {
     const subscription = await upsertFreeSubscription(shopDomain, context);
@@ -492,7 +506,7 @@ export async function syncSubscriptionFromShopifyWithStatus(
   const configWarning = appPricingConfigWarning();
 
   try {
-    const context = await getShopifyBillingContext(admin);
+    const context = await getShopifyBillingContext(admin, shopDomain);
 
     if (!hasPartnerApiCredentials()) {
       console.warn(
